@@ -1,18 +1,14 @@
 repos:
   - name: VulnerableApp
-    local_path: ./repos/VulnerableApp
+    git_url: https://github.com/rossobianero/VulnerableApp.git
+    branch: main
+    depth: 1
+    submodules: false
+    ephemeral: false
     scanners:
       - plugin: SemgrepPlugin
         config:
-          configs: ["p/owasp-top-ten"]   # or your custom rules dir
-          # no_git: true                 # uncomment if you ever see git issues
-          include: ["**/*.cs","**/*.json","**/*.yaml","**/*.yml","**/*.sh","**/Dockerfile"]
-          timeout: 180
+          configs: ["p/owasp-top-ten"]
       - plugin: DotnetAuditPlugin
         config:
-          projects:
-            #- VulnerableApp          # or "" to run at repo root
-
-#      - plugin: OSVScannerPlugin
-#        config:
-#          # lockfiles: ["package-lock.json","Pipfile.lock","poetry.lock"]  # optional
+          projects: [""]
