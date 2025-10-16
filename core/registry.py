@@ -1,5 +1,5 @@
 import importlib, pkgutil, pathlib, sys
-from typing import Dict, Type
+from typing import Dict
 from core.plugins import ScannerPlugin
 
 def load_plugins() -> Dict[str, type[ScannerPlugin]]:

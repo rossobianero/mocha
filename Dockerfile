@@ -6,5 +6,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . /app/
 
-# default command prints help
 CMD ["python", "/app/runner.py", "--help"]

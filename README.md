@@ -1,41 +1,38 @@
 # Agentic Security Remediator — Phase 1 (Plugin Starter)
 
-Solo-friendly, drop-in **plugin model** for code scanning integrations, with stubs for **Amazon Inspector**, **Synopsys Black Duck**, and **Synopsys Coverity**.
+Solo-friendly, drop-in **plugin model** with plugins for:
+- Amazon Inspector (stub)
+- Synopsys Black Duck (stub)
+- Synopsys Coverity (stub)
+- **Semgrep (SAST) — real runner via Docker or local binary**
+- **OSV-Scanner (SCA) — real runner via Docker or local binary**
 
-> ⚠️ This is a minimal starter. Some plugins call external CLIs/services (Detect, Coverity tools, AWS Inspector). You’ll need credentials/tools installed or containerized for real runs.
+> ⚠️ Some plugins require external CLIs/services. Semgrep/OSV can run using Docker images so you don't have to install local binaries.
 
-## Quick start (local)
+## Quick start
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-python runner.py --config config.example.yaml --repo-filter my-service
+# Edit config.semgrep-osv.yaml with the path to your local repo checkout
+python runner.py --config config.semgrep-osv.yaml --repo-filter my-dotnet-repo
 ```
 
 ## Docker
 ```bash
 docker build -t ai-sec-agent:dev .
-docker run --rm -v $(pwd)/data:/data -v $(pwd):/app ai-sec-agent:dev   python /app/runner.py --config /app/config.example.yaml
+docker run --rm -v $(pwd)/data:/data -v $(pwd):/app -v $(pwd)/repos:/repos ai-sec-agent:dev   python /app/runner.py --config /app/config.semgrep-osv.yaml --repo-filter my-dotnet-repo
 ```
 
 ## Layout
 ```
 core/            # plugin contracts, registry, normalization, helpers
-plugins/         # blackduck, coverity, amazon_inspector
+plugins/         # blackduck, coverity, amazon_inspector, semgrep, osv_scanner
 runner.py        # CLI orchestrator
 config.example.yaml
-```
-
-## Adding a plugin
-1. Create `plugins/your_tool.py` exporting a subclass of `ScannerPlugin`.
-2. Implement `validate_config()`, `prepare()` (optional), and `scan()`.
-3. Reference the class name under a repo in `config.yaml`:
-```yaml
-scanners:
-  - plugin: YourToolPlugin
-    config: { ... }
+config.semgrep-osv.yaml
 ```
 
 ## Notes
-- Findings are persisted under `./data/findings/<repo>/<timestamp>.json`.
-- Artifacts/temporary dirs should go under `/tmp` or `./data/artifacts`.
-- PR creation is stubbed in `core/gitops.py`—wire up GitHub App or PAT later.
+- Findings are saved under `./data/findings/<repo>/<timestamp>.json`.
+- To use Docker-based scanners, ensure Docker is available.
+- For local binaries set `use_docker: false` in config.

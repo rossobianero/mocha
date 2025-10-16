@@ -1,4 +1,4 @@
-import yaml, os, pathlib, datetime as dt
+import yaml, pathlib, datetime as dt
 
 def load_yaml(path:str):
     with open(path) as f:

@@ -1,0 +1,20 @@
+repos:
+  - name: my-dotnet-repo
+    url: git@github.com:you/my-dotnet-repo.git
+    default_branch: main
+    local_path: ./repos/my-dotnet-repo
+    scanners:
+      - plugin: SemgrepPlugin
+        config:
+          use_docker: true
+          rules:
+            - p/owasp-top-ten
+            - p/r2c-security-audit
+          extra_args:
+            - --timeout
+            - "180"
+      - plugin: OSVScannerPlugin
+        config:
+          use_docker: true
+          extra_args:
+            - --lockfile-only

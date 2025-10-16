@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-import argparse, time, json, os, pathlib, datetime as dt
+import argparse, json, pathlib, datetime as dt
 from core.util import load_yaml, log, ensure_dir
 from core.registry import load_plugins
-from core.normalize import dedupe, SEV_MAP
+from core.normalize import dedupe
 
 def run_repo(repo_cfg, plugins_map, out_dir):
     name = repo_cfg["name"]
@@ -32,7 +32,6 @@ def run_repo(repo_cfg, plugins_map, out_dir):
         except Exception as e:
             log(f"[ERROR] {plugin_name} failed: {e}")
 
-    # Normalize/dedupe and persist
     findings_all = dedupe(findings_all)
     ts = dt.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
     repo_out = pathlib.Path(out_dir) / name
