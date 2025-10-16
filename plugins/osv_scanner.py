@@ -20,7 +20,7 @@ class OSVScannerPlugin(ScannerPlugin):
                     "ghcr.io/google/osv-scanner:latest",
                     "--json","--output", out_json, "--recursive","/src", *extra]
         else:
-            return ["osv-scanner","--json","--output", out_json, "--recursive", repo_dir, *extra]
+            return ["osv-scanner","--format=json","--output", out_json,"--recursive", repo_dir, *extra]
 
     def scan(self, repo_dir, c):
         tmp = tempfile.mkdtemp()

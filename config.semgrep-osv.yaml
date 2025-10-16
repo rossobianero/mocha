@@ -1,12 +1,10 @@
 repos:
   - name: VulnerableApp
-    url: https://github.com/rossobianero/VulnerableApp.git
-    default_branch: main
-    local_path: ../VulnerableApp
+    local_path: ./repos/VulnerableApp
     scanners:
       - plugin: SemgrepPlugin
         config:
-          use_docker: true
+          use_docker: false     # <— key change
           rules:
             - p/owasp-top-ten
             - p/r2c-security-audit
@@ -15,6 +13,6 @@ repos:
             - "180"
       - plugin: OSVScannerPlugin
         config:
-          use_docker: true
+          use_docker: false     # <— key change
           extra_args:
             - --lockfile-only
