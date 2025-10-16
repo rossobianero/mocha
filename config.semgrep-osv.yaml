@@ -15,4 +15,4 @@ repos:
         config:
           use_docker: false     # <— key change
           extra_args:
-            - --lockfile-only
+
