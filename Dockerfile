@@ -1,12 +1,15 @@
 FROM python:3.11-slim
 
-# Basic OS tools for fetching/installing binaries
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl git unzip tar jq \
- && rm -rf /var/lib/apt/lists/*
+# Install prerequisites for .NET + build tools
+RUN apt-get update && apt-get install -y ca-certificates curl git unzip tar jq wget gnupg apt-transport-https && \
+    wget https://packages.microsoft.com/config/debian/12/packages-microsoft-prod.deb -O packages-microsoft-prod.deb && \
+    dpkg -i packages-microsoft-prod.deb && \
+    rm packages-microsoft-prod.deb && \
+    apt-get update && apt-get install -y dotnet-sdk-8.0 && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 
+# Continue with Python dependencies
 WORKDIR /app
-
 # ---- Install Semgrep (CLI) ----
 # Using pip keeps it multi-arch friendly (x86_64/arm64)
 COPY requirements.txt /app/

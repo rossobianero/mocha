@@ -1,3 +1,4 @@
+# plugins/osv_scanner.py
 import os, json, subprocess, tempfile, shlex
 from core.plugins import ScannerPlugin, Finding
 
@@ -6,6 +7,8 @@ SEV_ORDER = ["low","medium","high","critical"]
 def _best_severity(sev_list):
     lvl = "medium"
     for s in (sev_list or []):
+        if not isinstance(s, dict):
+            continue
         score = str(s.get("score","")).upper()
         if score in ("CRITICAL","HIGH","MEDIUM","LOW"):
             cand = score.lower()
@@ -19,22 +22,21 @@ def _best_severity(sev_list):
             lvl = cand
     return lvl
 
+def _ensure_list(x):
+    return x if isinstance(x, list) else []
+
 class OSVScannerPlugin(ScannerPlugin):
     name, kind = "osv_scanner", "SCA"
 
     def validate_config(self, c):
-        # Accepted keys:
-        #   lockfiles: list[str]     (e.g., ["package-lock.json","poetry.lock"])
-        #   extra_args: list[str]    (advanced)
+        # Accepted keys: lockfiles: [..], extra_args: [..]
         pass
 
     def _cmd(self, repo_dir: str, c: dict) -> list[str]:
         cmd = ["osv-scanner", "scan", "--format", "json"]
-        lockfiles = c.get("lockfiles") or []
-        for lf in lockfiles:
-            # support both absolute or relative lockfile paths
+        for lf in (c.get("lockfiles") or []):
             cmd += ["-L", lf if os.path.isabs(lf) else os.path.join(repo_dir, lf)]
-        if not lockfiles:
+        if not c.get("lockfiles"):
             cmd.append(repo_dir)
         cmd += (c.get("extra_args") or [])
         return cmd
@@ -43,13 +45,11 @@ class OSVScannerPlugin(ScannerPlugin):
         cmd = self._cmd(repo_dir, c)
         proc = subprocess.run(cmd, check=True, capture_output=True, text=True)
         raw = (proc.stdout or "").strip()
-
-        # Some builds might print a header before JSON; slice from first '{'
         if not raw.startswith("{"):
             i = raw.find("{")
             raw = raw[i:] if i != -1 else "{}"
 
-        data = {}
+        # Try parse; if it fails, save raw and return empty
         try:
             data = json.loads(raw or "{}")
         except Exception:
@@ -58,7 +58,7 @@ class OSVScannerPlugin(ScannerPlugin):
             with open(p, "w") as f: f.write(raw)
             return [], {"json": p, "cmd": " ".join(shlex.quote(x) for x in cmd), "note": "Non-JSON output saved."}
 
-        # Handle both dict-with-results and bare list
+        # Normalize to a list of "results"
         if isinstance(data, dict):
             results = data.get("results") or []
         elif isinstance(data, list):
@@ -67,11 +67,20 @@ class OSVScannerPlugin(ScannerPlugin):
             results = []
 
         findings = []
-        for res in (results or []):
-            for pkg in (res.get("packages") or []):
-                pinfo = (pkg.get("package") or {})
+
+        for res in _ensure_list(results):
+            if not isinstance(res, dict):
+                continue
+
+            # Primary schema: results[].packages[][].vulnerabilities[]
+            for pkg in _ensure_list(res.get("packages")):
+                if not isinstance(pkg, dict):
+                    continue
+                pinfo = pkg.get("package") if isinstance(pkg.get("package"), dict) else {}
                 purl  = pinfo.get("purl")
-                for v in (pkg.get("vulnerabilities") or []):
+                for v in _ensure_list(pkg.get("vulnerabilities")):
+                    if not isinstance(v, dict):
+                        continue
                     vid = v.get("id") or "OSV-UNKNOWN"
                     findings.append(Finding(
                         id=vid,
@@ -85,7 +94,24 @@ class OSVScannerPlugin(ScannerPlugin):
                         metadata=v
                     ))
 
-        # Persist JSON artifact
+            # Fallback schema seen in some builds: results[].vulnerabilities[] directly
+            for v in _ensure_list(res.get("vulnerabilities")):
+                if not isinstance(v, dict):
+                    continue
+                vid = v.get("id") or "OSV-UNKNOWN"
+                findings.append(Finding(
+                    id=vid,
+                    tool="osv_scanner", kind="SCA",
+                    severity=_best_severity(v.get("severity")),
+                    cwe=None,
+                    cve=[vid] if vid.startswith("CVE-") else None,
+                    file=None, start_line=None,
+                    message=v.get("summary") or v.get("details",""),
+                    component=None,  # no purl at this level
+                    metadata=v
+                ))
+
+        # Persist parsed JSON for debugging
         tmp = tempfile.mkdtemp()
         out_json = os.path.join(tmp, "osv.json")
         with open(out_json, "w") as f: f.write(raw)

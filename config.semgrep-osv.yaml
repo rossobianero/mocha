@@ -8,6 +8,11 @@ repos:
           # no_git: true                 # uncomment if you ever see git issues
           include: ["**/*.cs","**/*.json","**/*.yaml","**/*.yml","**/*.sh","**/Dockerfile"]
           timeout: 180
-      - plugin: OSVScannerPlugin
+      - plugin: DotnetAuditPlugin
         config:
-          # lockfiles: ["package-lock.json","Pipfile.lock","poetry.lock"]  # optional
+          projects:
+            #- VulnerableApp          # or "" to run at repo root
+
+#      - plugin: OSVScannerPlugin
+#        config:
+#          # lockfiles: ["package-lock.json","Pipfile.lock","poetry.lock"]  # optional
