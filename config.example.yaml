@@ -1,0 +1,21 @@
+repos:
+  - name: my-service
+    url: git@github.com:you/my-service.git
+    default_branch: main
+    local_path: ./repos/my-service
+    scanners:
+      - plugin: BlackDuckPlugin
+        config:
+          blackduck_url: https://bd.example.com
+          api_token_var: BLACKDUCK_API_TOKEN
+          project: my-service
+          version: auto
+      - plugin: CoverityPlugin
+        config:
+          build_cmd: "make -j4"
+      - plugin: AmazonInspectorPlugin
+        config:
+          aws_region: us-east-1
+          mode: ecr
+          ecr_repos:
+            - 000000000000.dkr.ecr.us-east-1.amazonaws.com/my-service
