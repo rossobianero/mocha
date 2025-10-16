@@ -2,13 +2,13 @@ repos:
   - name: VulnerableApp
     git_url: https://github.com/rossobianero/VulnerableApp.git
     branch: main
-    depth: 1
-    submodules: false
-    ephemeral: false
+    depth: 0
+    # submodules: false
+    # ephemeral: false
     scanners:
       - plugin: SemgrepPlugin
         config:
           configs: ["p/owasp-top-ten"]
-      - plugin: DotnetAuditPlugin
-        config:
-          projects: [""]
+      # - plugin: DotnetAuditPlugin
+      #   config:
+      #     projects: [""]

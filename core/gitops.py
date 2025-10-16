@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Optional
 
 def _run(cmd, cwd: Optional[str] = None, check=True):
+    print("Running gitops ...")
     return subprocess.run(cmd, cwd=cwd, check=check, text=True,
                           capture_output=True)
 

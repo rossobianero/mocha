@@ -56,6 +56,44 @@ def main():
     for repo in cfg.get("repos", []):
         if args.repo_filter and repo["name"] != args.repo_filter:
             continue
+        # runner.py — inside the for repo in cfg["repos"] loop
+        from core.util import log
+        from core.gitops import GitWorkspace
+        import os
+
+        git_url    = repo.get("git_url")
+        branch     = repo.get("branch")
+        commit     = repo.get("commit")
+        pr_number  = repo.get("pr")          # integer or str
+        ephemeral  = bool(repo.get("ephemeral", False))
+        depth      = int(repo.get("depth", 1))
+        submodules = bool(repo.get("submodules", False))
+
+        if git_url:
+            log(f"[gitops] activating workspace url={git_url} branch={branch} commit={commit} pr={pr_number} ephemeral={ephemeral}")
+            with GitWorkspace(
+                git_url=git_url,
+                base_dir="./repos",
+                branch=branch,
+                commit=commit,
+                pr_number=int(pr_number) if pr_number is not None else None,
+                depth=depth,
+                submodules=submodules,
+                ephemeral=ephemeral,
+            ) as repo_dir:
+                log(f"[gitops] workspace ready at {repo_dir}")
+                # IMPORTANT: pass the resolved path down to run_repo
+                repo_for_run = {**repo, "local_path": repo_dir}
+                # Avoid any stale local_path from YAML
+                repo_for_run.pop("git_url", None)
+                run_repo(repo_for_run, plugins_map, args.out_dir)
+            continue  # don’t fall through
+
+        # fallback to legacy local_path behavior
+        local_path = repo.get("local_path")
+        if not local_path or not os.path.exists(local_path):
+            log(f"[ERROR] No repo path found for {repo.get('name')}; set git_url or local_path")
+            continue
         run_repo(repo, plugins_map, args.out_dir)
 
 if __name__ == "__main__":
