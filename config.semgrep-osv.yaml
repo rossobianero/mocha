@@ -1,8 +1,8 @@
 repos:
-  - name: my-dotnet-repo
-    url: git@github.com:you/my-dotnet-repo.git
+  - name: VulnerableApp
+    url: https://github.com/rossobianero/VulnerableApp.git
     default_branch: main
-    local_path: ./repos/my-dotnet-repo
+    local_path: ../VulnerableApp
     scanners:
       - plugin: SemgrepPlugin
         config:

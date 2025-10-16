@@ -14,13 +14,13 @@ Solo-friendly, drop-in **plugin model** with plugins for:
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 # Edit config.semgrep-osv.yaml with the path to your local repo checkout
-python runner.py --config config.semgrep-osv.yaml --repo-filter my-dotnet-repo
+python runner.py --config config.semgrep-osv.yaml --repo-filter VulnerableApp
 ```
 
 ## Docker
 ```bash
 docker build -t ai-sec-agent:dev .
-docker run --rm -v $(pwd)/data:/data -v $(pwd):/app -v $(pwd)/repos:/repos ai-sec-agent:dev   python /app/runner.py --config /app/config.semgrep-osv.yaml --repo-filter my-dotnet-repo
+docker run --rm -v $(pwd)/data:/data -v $(pwd):/app -v $(pwd)/../repos:/repos ai-sec-agent:dev python /app/runner.py --config /app/config.semgrep-osv.yaml --repo-filter VulnerableApp
 ```
 
 ## Layout
