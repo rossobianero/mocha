@@ -4,16 +4,10 @@ repos:
     scanners:
       - plugin: SemgrepPlugin
         config:
-          use_docker: false     # <— key change
-          no_git: true
-          rules:
-            - p/owasp-top-ten
-            - p/r2c-security-audit
-          extra_args:
-            - --timeout
-            - "180"
+          configs: ["p/owasp-top-ten"]   # or your custom rules dir
+          # no_git: true                 # uncomment if you ever see git issues
+          include: ["**/*.cs","**/*.json","**/*.yaml","**/*.yml","**/*.sh","**/Dockerfile"]
+          timeout: 180
       - plugin: OSVScannerPlugin
         config:
-          use_docker: false     # <— key change
-          extra_args:
-
+          # lockfiles: ["package-lock.json","Pipfile.lock","poetry.lock"]  # optional

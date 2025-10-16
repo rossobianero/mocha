@@ -1,4 +1,4 @@
-import json, subprocess, tempfile, os, shlex
+import os, json, subprocess, tempfile, shlex
 from core.plugins import ScannerPlugin, Finding
 
 SEV_ORDER = ["low","medium","high","critical"]
@@ -21,44 +21,35 @@ def _best_severity(sev_list):
 
 class OSVScannerPlugin(ScannerPlugin):
     name, kind = "osv_scanner", "SCA"
-    VERSION = "2025-10-15-hardended"
 
-    def validate_config(self, c):  # optional keys: use_docker, lockfiles, extra_args
+    def validate_config(self, c):
+        # Accepted keys:
+        #   lockfiles: list[str]     (e.g., ["package-lock.json","poetry.lock"])
+        #   extra_args: list[str]    (advanced)
         pass
 
-    def _docker_cmd(self, repo_dir, c):
-        mount = os.path.abspath(repo_dir)
-        cmd = ["docker","run","--rm","-v",f"{mount}:/src","-w","/src",
-               "ghcr.io/google/osv-scanner:latest","scan","--format","json"]
-        for lf in (c.get("lockfiles") or []):
-            cmd += ["-L", lf]              # relative to /src
-        if not c.get("lockfiles"):
-            cmd += ["/src"]
+    def _cmd(self, repo_dir: str, c: dict) -> list[str]:
+        cmd = ["osv-scanner", "scan", "--format", "json"]
+        lockfiles = c.get("lockfiles") or []
+        for lf in lockfiles:
+            # support both absolute or relative lockfile paths
+            cmd += ["-L", lf if os.path.isabs(lf) else os.path.join(repo_dir, lf)]
+        if not lockfiles:
+            cmd.append(repo_dir)
         cmd += (c.get("extra_args") or [])
         return cmd
 
-    def _local_cmd(self, repo_dir, c):
-        cmd = ["osv-scanner","scan","--format","json"]
-        for lf in (c.get("lockfiles") or []):
-            cmd += ["-L", os.path.join(repo_dir, lf)]
-        if not c.get("lockfiles"):
-            cmd += [repo_dir]
-        cmd += (c.get("extra_args") or [])
-        return cmd
-
-    def scan(self, repo_dir, c):
-        use_docker = c.get("use_docker", True)
-        cmd = self._docker_cmd(repo_dir, c) if use_docker else self._local_cmd(repo_dir, c)
-
+    def scan(self, repo_dir: str, c: dict):
+        cmd = self._cmd(repo_dir, c)
         proc = subprocess.run(cmd, check=True, capture_output=True, text=True)
         raw = (proc.stdout or "").strip()
 
-        # Slice off any banner text before the first '{'
+        # Some builds might print a header before JSON; slice from first '{'
         if not raw.startswith("{"):
             i = raw.find("{")
             raw = raw[i:] if i != -1 else "{}"
 
-        # Parse JSON (or bail out with raw artifact)
+        data = {}
         try:
             data = json.loads(raw or "{}")
         except Exception:
@@ -67,7 +58,7 @@ class OSVScannerPlugin(ScannerPlugin):
             with open(p, "w") as f: f.write(raw)
             return [], {"json": p, "cmd": " ".join(shlex.quote(x) for x in cmd), "note": "Non-JSON output saved."}
 
-        # Normalize shape
+        # Handle both dict-with-results and bare list
         if isinstance(data, dict):
             results = data.get("results") or []
         elif isinstance(data, list):
@@ -90,12 +81,13 @@ class OSVScannerPlugin(ScannerPlugin):
                         cve=[vid] if vid.startswith("CVE-") else None,
                         file=None, start_line=None,
                         message=v.get("summary") or v.get("details",""),
-                        component=purl, metadata=v
+                        component=purl,
+                        metadata=v
                     ))
 
-        # Persist captured JSON as artifact
+        # Persist JSON artifact
         tmp = tempfile.mkdtemp()
         out_json = os.path.join(tmp, "osv.json")
         with open(out_json, "w") as f: f.write(raw)
 
-        return findings, {"json": out_json, "cmd": " ".join(shlex.quote(x) for x in cmd), "plugin_version": self.VERSION}
+        return findings, {"json": out_json, "cmd": " ".join(shlex.quote(x) for x in cmd)}
