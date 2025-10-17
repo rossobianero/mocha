@@ -9,6 +9,6 @@ repos:
       - plugin: SemgrepPlugin
         config:
           configs: ["p/owasp-top-ten"]
-      # - plugin: DotnetAuditPlugin
-      #   config:
-      #     projects: [""]
+      - plugin: DotnetAuditPlugin
+        config:
+          projects: [""]
