@@ -37,6 +37,22 @@ Keep patches minimal and correct. Never invent files.
 """
 
 # ------------- helpers -------------
+def _textify(x) -> str:
+    """Coerce LLM fields to a readable string."""
+    if x is None:
+        return ""
+    if isinstance(x, str):
+        return x
+    if isinstance(x, list):
+        return "\n".join(_textify(i) for i in x)
+    if isinstance(x, dict):
+        try:
+            import json
+            return json.dumps(x, indent=2)
+        except Exception:
+            return str(x)
+    return str(x)
+
 def _read_context(repo_dir: str, file: Optional[str], line: Optional[int], span: int = 20) -> str:
     if not file: return ""
     p = Path(repo_dir) / file
@@ -217,7 +233,7 @@ class CodeFixer:
             # Save patch artifact and validate if present
             patch_path = None
             validation_summary = "not validated"
-            if resp.get("patch_unified") and resp["patch_unified"].strip():
+            if _textify(resp.get("patch_unified")) and resp["patch_unified"].strip():
                 patch_path = os.path.join(out_dir, f"patch_{idx:03d}.diff")
                 Path(patch_path).write_text(resp["patch_unified"])
                 if self.validate:
