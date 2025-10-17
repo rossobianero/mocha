@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
-import argparse, json, pathlib, datetime as dt
+import argparse, json, pathlib, datetime as dt, os
 from core.util import load_yaml, log, ensure_dir
 from core.registry import load_plugins
 from core.normalize import dedupe
+
+# Optional import: CodeFixer (AI/code suggestions report)
+# - By default, CodeFixer uses a no-external-API fallback (rule-based).
+# - If you later wire an LLM client, you can pass it into CodeFixer().
+from core.fixer import CodeFixer  # make sure core/fixer.py exists as provided earlier
+
 
 def run_repo(repo_cfg, plugins_map, out_dir):
     name = repo_cfg["name"]
@@ -42,11 +48,14 @@ def run_repo(repo_cfg, plugins_map, out_dir):
     log(f"[{name}] Saved findings → {out_file}")
     return out_file, artifacts_all
 
+
 def main():
     ap = argparse.ArgumentParser(description="Phase 1 security agent runner (plugin-based)")
     ap.add_argument("--config", required=True, help="Path to config YAML")
     ap.add_argument("--repo-filter", help="Only run for repos with this name")
     ap.add_argument("--out-dir", default="./data/findings", help="Findings output dir")
+    ap.add_argument("--fix", action="store_true",
+                    help="Generate AI fix suggestions report after scanning")
     args = ap.parse_args()
 
     cfg = load_yaml(args.config)
@@ -56,10 +65,9 @@ def main():
     for repo in cfg.get("repos", []):
         if args.repo_filter and repo["name"] != args.repo_filter:
             continue
-        # runner.py — inside the for repo in cfg["repos"] loop
-        from core.util import log
+
+        # Git workspace handling (clone/checkout on demand)
         from core.gitops import GitWorkspace
-        import os
 
         git_url    = repo.get("git_url")
         branch     = repo.get("branch")
@@ -84,17 +92,33 @@ def main():
                 log(f"[gitops] workspace ready at {repo_dir}")
                 # IMPORTANT: pass the resolved path down to run_repo
                 repo_for_run = {**repo, "local_path": repo_dir}
-                # Avoid any stale local_path from YAML
+                # Avoid any stale git_url from YAML leaking into downstream
                 repo_for_run.pop("git_url", None)
-                run_repo(repo_for_run, plugins_map, args.out_dir)
+
+                out_file, _ = run_repo(repo_for_run, plugins_map, args.out_dir)
+
+                # Optional AI/code-fix suggestions
+                if args.fix:
+                    findings_dir = os.path.join(args.out_dir, repo["name"])
+                    fixer = CodeFixer()  # or CodeFixer(OpenAILLMClient("gpt-4o-mini")) if you wire one
+                    report_path = fixer.suggest_fixes(repo["name"], repo_dir, findings_dir)
+                    log(f"[{repo['name']}] Fix report at {report_path}")
             continue  # don’t fall through
 
-        # fallback to legacy local_path behavior
+        # Fallback: legacy local_path behavior
         local_path = repo.get("local_path")
         if not local_path or not os.path.exists(local_path):
             log(f"[ERROR] No repo path found for {repo.get('name')}; set git_url or local_path")
             continue
-        run_repo(repo, plugins_map, args.out_dir)
+
+        out_file, _ = run_repo(repo, plugins_map, args.out_dir)
+
+        if args.fix:
+            findings_dir = os.path.join(args.out_dir, repo["name"])
+            fixer = CodeFixer()
+            report_path = fixer.suggest_fixes(repo["name"], local_path, findings_dir)
+            log(f"[{repo['name']}] Fix report at {report_path}")
+
 
 if __name__ == "__main__":
     main()
