@@ -31,6 +31,7 @@ SEV_ORDER = ["low","medium","high","critical"]
 
 SYSTEM_PROMPT = """You are a senior security engineer. Return STRICT JSON with keys:
 ["rationale","patch_unified","tests","risk","commands"].
+All values MUST be strings (join multiple commands with newline).
 The patch MUST be a unified diff that applies cleanly to the given paths.
 If no change needed, set "patch_unified" to "" and explain in "rationale".
 Keep patches minimal and correct. Never invent files.
@@ -182,7 +183,6 @@ class PatchValidator:
             shutil.rmtree(os.path.dirname(tmp_repo), ignore_errors=True)
             return (ok, msg if msg else ("applies cleanly" if ok else "failed to apply"))
         elif self.has_patch:
-            # Try with `patch` (strip 0/1 prefixes might be required)
             p = subprocess.run(["patch","--dry-run","-p0","-i", patch_path], cwd=tmp_repo,
                                capture_output=True, text=True)
             ok = (p.returncode == 0)
@@ -221,7 +221,7 @@ class CodeFixer:
             else:
                 user_prompt = f"Tool: {f.get('tool')}\nFinding: {f.get('id')}\nMessage: {f.get('message')}"
 
-            # get answer
+            # get answer (AI or fallback)
             try:
                 resp = self.llm.generate_json(SYSTEM_PROMPT, user_prompt)
             except Exception:
@@ -230,17 +230,25 @@ class CodeFixer:
                 rb = _best_effort_rule_fix(f, repo_dir, ctx)
                 resp = {**rb, **(resp or {})}
 
+            # --- Normalize fields to strings ---
+            rationale_txt     = _textify(resp.get("rationale"))
+            patch_unified_txt = _textify(resp.get("patch_unified"))
+            tests_txt         = _textify(resp.get("tests"))
+            risk_txt          = _textify(resp.get("risk"))
+            commands_txt      = _textify(resp.get("commands"))
+
             # Save patch artifact and validate if present
             patch_path = None
             validation_summary = "not validated"
-            if _textify(resp.get("patch_unified")) and resp["patch_unified"].strip():
+            if patch_unified_txt.strip():
                 patch_path = os.path.join(out_dir, f"patch_{idx:03d}.diff")
-                Path(patch_path).write_text(resp["patch_unified"])
+                Path(patch_path).write_text(patch_unified_txt)
                 if self.validate:
-                    ok, msg = self.validator.check(repo_dir, resp["patch_unified"])
+                    ok, msg = self.validator.check(repo_dir, patch_unified_txt)
                     validation_summary = f"{'✅ applies cleanly' if ok else '❌ does NOT apply'} — {msg.strip()}" if msg else ("✅ applies cleanly" if ok else "❌ does NOT apply")
                 else:
                     validation_summary = "validation disabled"
+                log(f"[fixer] Saved patch → {patch_path}")
 
             # compose section
             sec = [
@@ -250,11 +258,11 @@ class CodeFixer:
                 f"**Component:** `{f.get('component')}`" if f.get("component") else "",
                 "",
                 "### Rationale",
-                (resp.get("rationale") or "_(none)_"),
+                (rationale_txt or "_(none)_"),
                 "",
                 "### Suggested Patch (unified diff)",
                 "```diff",
-                (resp.get("patch_unified","").strip() or "# (No concrete patch available; manual change required.)"),
+                (patch_unified_txt.strip() or "# (No concrete patch available; manual change required.)"),
                 "```",
                 (f"_Patch file_: `{os.path.relpath(patch_path, start='.')}`" if patch_path else ""),
                 "",
@@ -262,13 +270,13 @@ class CodeFixer:
                 validation_summary,
                 "",
                 "### Tests / Validation",
-                (resp.get("tests") or "_(none)_"),
+                (tests_txt or "_(none)_"),
                 "",
                 "### Operational Risk",
-                (resp.get("risk") or "_(unspecified)_"),
+                (risk_txt or "_(unspecified)_"),
                 "",
                 "### Suggested Commands",
-                f"```bash\n{(resp.get('commands') or '').strip()}\n```" if resp.get("commands") else "_(none)_",
+                (f"```bash\n{commands_txt.strip()}\n```" if commands_txt.strip() else "_(none)_"),
                 "",
                 "---",
                 ""
