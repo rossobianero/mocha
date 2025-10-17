@@ -1,6 +1,6 @@
 # core/fixer.py
 from __future__ import annotations
-import os, json, glob, datetime as dt, tempfile, shutil, subprocess, re
+import os, json, glob, datetime as dt, tempfile, shutil, subprocess, re, difflib
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
 from shutil import which
@@ -16,7 +16,7 @@ _VERBOSE = os.getenv("FIXER_VERBOSE", "").lower() in ("1","true","yes","on")
 try:
     _VERBOSE_MAX = int(os.getenv("FIXER_VERBOSE_MAX", "").strip() or "0")
 except Exception:
-    _VERBOSE_MAX = 0  # 0 => unlimited
+    _VERBOSE_MAX = 0  # 0 = unlimited
 
 def _maybe_truncate(s: str) -> str:
     if _VERBOSE_MAX and len(s) > _VERBOSE_MAX:
@@ -42,15 +42,28 @@ except Exception:
 class LLMClient:
     """Interface; pass a real client (e.g., OpenAILLMClient) here."""
     def generate_json(self, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
-        return {"rationale": "LLM disabled", "patch_unified": "", "tests": "", "risk": "", "commands": ""}
+        # Fallback if no real client is wired
+        return {
+            "rationale": "LLM disabled",
+            "revised_file": "",
+            "revised_lines": [],
+            "patch_unified": "",
+            "tests": "",
+            "risk": "",
+            "commands": "",
+            "target_file": ""
+        }
 
 SYSTEM_PROMPT = """You are a senior software engineer assisting with automated security fixes.
-Return STRICT JSON with keys ["rationale","patch_unified","tests","risk","commands"].
-All values MUST be strings. The patch MUST be a valid unified diff.
-Headers MUST be:
---- a/<relative-path-from-repo-root>
-+++ b/<relative-path-from-repo-root>
-Only modify files that exist. Keep changes minimal. If unsure, return "patch_unified": "".
+Return STRICT JSON with keys:
+["rationale","revised_file","revised_lines","patch_unified","tests","risk","commands","target_file"].
+Rules:
+- Prefer "revised_file": the ENTIRE revised file contents as a single string (no backticks, no fences).
+- Or "revised_lines": array of ENTIRE revised file lines (strings only).
+- You MAY also include "patch_unified", but it will be ignored if a full revised file/lines are provided.
+- "target_file" MUST be a relative path from the repo root to the file you revised IF the tool’s finding did not specify a valid file path or if the fix requires editing a different file. Example: "Dockerfile", "VulnerableApp/VulnerableApp.csproj", etc.
+- All values MUST be strings, except "revised_lines" which MUST be an array of strings.
+- Only modify existing files. Keep changes minimal. If unsure, leave revised values empty.
 """
 
 # --------------- small helpers ---------------
@@ -68,10 +81,10 @@ def _latest_findings_path(findings_dir: str) -> Optional[str]:
     return files[-1] if files else None
 
 def _relpath_under_repo(repo_dir: str, any_path: str) -> str:
+    """Normalize any_path to something that exists under repo_dir, else best-effort clean path."""
     if not any_path: return any_path
     p = any_path.strip()
     p = re.sub(r"^(a/|b/)", "", p)
-    # try suffixes that exist
     parts = p.split("/")
     candidates = []
     for i in range(len(parts)):
@@ -79,96 +92,66 @@ def _relpath_under_repo(repo_dir: str, any_path: str) -> str:
         if (Path(repo_dir) / candidate).exists():
             candidates.append(candidate)
     if candidates:
-        candidates.sort(key=len)
+        candidates.sort(key=len)  # prefer shortest valid suffix
         return candidates[0]
-    # fallback strip prefixes
     p = re.sub(r"^\./+", "", p)
     p = re.sub(r"^repos/[^/]+/", "", p)
     p = re.sub(r"^/+", "", p)
     return p
 
-def _ensure_headers(unified_patch: str, relpath: str) -> str:
-    if not unified_patch.strip() or not relpath:
-        return unified_patch
-    lines = [ln.rstrip("\n") for ln in unified_patch.splitlines()]
-    has_header = any(ln.startswith("--- ") for ln in lines) and any(ln.startswith("+++ ") for ln in lines)
-    if has_header: return unified_patch
-    return "\n".join([f"--- a/{relpath}", f"+++ b/{relpath}"] + lines)
+def _read_file(repo_dir: str, rel: Optional[str]) -> Tuple[Optional[Path], str]:
+    if not rel:
+        return None, ""
+    path = Path(repo_dir) / rel
+    if not path.exists():
+        return None, ""
+    return path, path.read_text(errors="ignore")
 
-def _normalize_diff_paths(unified_patch: str, repo_dir: str) -> str:
-    out = []
-    for ln in unified_patch.splitlines():
-        if ln.startswith("--- "):
-            rel = _relpath_under_repo(repo_dir, ln[4:].strip())
-            out.append(f"--- a/{rel}")
-        elif ln.startswith("+++ "):
-            rel = _relpath_under_repo(repo_dir, ln[4:].strip())
-            out.append(f"+++ b/{rel}")
-        else:
-            out.append(ln)
-    text = "\n".join(out)
-    if text and not text.endswith("\n"): text += "\n"
-    return text
-
-def _lint_diff_with_unidiff(diff_text: str) -> Tuple[bool, str]:
-    """Return (ok, error_message). Only structural lint; does NOT check apply."""
-    if not HAVE_UNIDIFF:
-        return True, ""
-    try:
-        PatchSet.from_string(diff_text)
-        return True, ""
-    except Exception as e:
-        return False, str(e)
-
-def _file_context(repo_dir: str, relpath: Optional[str], start_line: Optional[int], radius: int = 20) -> str:
-    if not relpath: return ""
-    p = Path(repo_dir) / relpath
-    if not p.exists(): return ""
-    try:
-        lines = p.read_text(errors="ignore").splitlines()
-        ln = start_line or 1
-        a = max(1, ln - radius); b = min(len(lines), ln + radius)
-        return "\n".join(f"{i:6d}: {lines[i-1]}" for i in range(a, b+1))
-    except Exception:
+def _file_context_full(repo_dir: str, rel: Optional[str]) -> str:
+    p, txt = _read_file(repo_dir, rel)
+    if not p:
         return ""
+    return f"<<<BEGIN_FILE\n{txt}\nEND_FILE>>>"
 
-def _build_semgrep_prompt(f: dict, context: str, repo_dir: str) -> str:
-    rel = _relpath_under_repo(repo_dir, f["file"]) if f.get("file") else "(unknown)"
-    return f"""Repo root: {repo_dir}
-Target file (relative to repo root): {rel}
-Tool: {f.get('tool')}
-Rule/ID: {f.get('id')}
-Severity: {f.get('severity')}
-Line: {f.get('start_line')}
-Message: {f.get('message')}
-CWE(s): {', '.join(f.get('cwe') or []) if f.get('cwe') else 'n/a'}
+def _search_by_basename(repo_dir: str, name: str) -> Optional[str]:
+    """Find a single file by basename anywhere under repo_dir. Return relative path or None."""
+    name = name.strip()
+    matches = [str(p.relative_to(repo_dir)) for p in Path(repo_dir).rglob(name) if p.is_file()]
+    if len(matches) == 1:
+        return matches[0]
+    # Prefer top-level match (shortest path)
+    if matches:
+        matches.sort(key=lambda s: (s.count("/"), len(s)))
+        return matches[0]
+    return None
 
-Context (around the line, trimmed):
-{context or '(no context)'}
+def _select_target_file(repo_dir: str, hinted_rel: Optional[str], resp_target: Optional[str]) -> Optional[str]:
+    """
+    Decide which file to use for diff construction.
+    Priority:
+        1) Valid hinted_rel (from finding['file']) if exists
+        2) resp_target (LLM-provided) normalized and exists
+        3) basename search using resp_target
+    """
+    # 1) hinted_rel (already normalized earlier)
+    if hinted_rel:
+        p = Path(repo_dir) / hinted_rel
+        if p.exists():
+            return hinted_rel
 
-Produce a minimal unified diff. Use the exact headers:
---- a/<relative-path-from-repo-root>
-+++ b/<relative-path-from-repo-root>
-"""
+    # 2) resp_target
+    if resp_target and isinstance(resp_target, str) and resp_target.strip():
+        normalized = _relpath_under_repo(repo_dir, resp_target)
+        p = Path(repo_dir) / normalized
+        if p.exists():
+            return normalized
+        # 3) basename search
+        base = os.path.basename(normalized)
+        found = _search_by_basename(repo_dir, base)
+        if found:
+            return found
 
-def _build_dotnet_prompt(f: dict, repo_dir: str) -> str:
-    rel = "(unknown)"
-    csprojs = list(Path(repo_dir).glob("**/*.csproj"))
-    if csprojs:
-        rel = os.path.relpath(csprojs[0].as_posix(), repo_dir)
-    return f"""Repo root: {repo_dir}
-Target project file: {rel}
-Tool: {f.get('tool')}
-Finding: {f.get('id')}
-Component: {f.get('component')}
-Message: {f.get('message')}
-
-Produce a minimal unified diff to address the vulnerability (e.g., bump a single PackageReference).
-Use headers:
---- a/{rel}
-+++ b/{rel}
-Only modify existing files. If unsure, return empty patch.
-"""
+    return None
 
 # --------------- validation/apply ---------------
 class PatchValidator:
@@ -213,7 +196,6 @@ class PatchValidator:
             shutil.rmtree(os.path.dirname(tmp_repo), ignore_errors=True)
 
     def apply(self, repo_dir: str, unified_patch: str) -> tuple[bool, str]:
-        """Apply patch to the real working tree."""
         patch_path = os.path.join(repo_dir, ".ai_fix_apply.diff")
         Path(patch_path).write_text(unified_patch if unified_patch.endswith("\n") else unified_patch + "\n")
         try:
@@ -237,6 +219,51 @@ class PatchValidator:
             try: os.remove(patch_path)
             except Exception: pass
 
+# ---------------- prompt builders ----------------
+def _build_semgrep_prompt(f: dict, repo_dir: str) -> str:
+    rel = _relpath_under_repo(repo_dir, f.get("file") or "") if f.get("file") else "(unknown)"
+    full_file = _file_context_full(repo_dir, rel if rel != "(unknown)" else None)
+    needs_target = " (Include 'target_file' if you change a different file.)"
+    return f"""Repo root: {repo_dir}
+Target file (relative to repo root): {rel}
+Tool: {f.get('tool')}
+Rule/ID: {f.get('id')}
+Severity: {f.get('severity')}
+Line: {f.get('start_line')}
+Message: {f.get('message')}
+CWE(s): {', '.join(f.get('cwe') or []) if f.get('cwe') else 'n/a'}
+
+Current file contents:
+{full_file or '(file not found)'}
+
+TASK:
+Return STRICT JSON. Prefer "revised_file" (ENTIRE revised file) or "revised_lines" (ENTIRE file as array).
+Also include "target_file" if the file path above is unknown/incorrect or if a different file must be modified.{needs_target}
+No backticks or fences in values.
+"""
+
+def _build_dotnet_prompt(f: dict, repo_dir: str) -> str:
+    rel = "(unknown)"
+    csprojs = list(Path(repo_dir).glob("**/*.csproj"))
+    if csprojs:
+        rel = os.path.relpath(csprojs[0].as_posix(), repo_dir)
+    full_file = _file_context_full(repo_dir, rel if rel != "(unknown)" else None)
+    return f"""Repo root: {repo_dir}
+Target project file: {rel}
+Tool: {f.get('tool')}
+Finding: {f.get('id')}
+Component: {f.get('component')}
+Message: {f.get('message')}
+
+Current file contents:
+{full_file or '(file not found)'}
+
+TASK:
+Return STRICT JSON. Prefer "revised_file" (ENTIRE revised XML) or "revised_lines" (ENTIRE XML as array).
+If the needed change is in a different project file, set "target_file" to that .csproj path.
+No backticks or fences in values.
+"""
+
 # ------------------ main API ------------------
 class CodeFixer:
     def __init__(self, llm: Optional[LLMClient] = None, validate_patches: bool = True):
@@ -246,20 +273,28 @@ class CodeFixer:
 
     def _prompt_for_finding(self, f: dict, repo_dir: str) -> str:
         tool = (f.get("tool") or "").lower()
-        rel = _relpath_under_repo(repo_dir, f["file"]) if f.get("file") else None
-        ctx = _file_context(repo_dir, rel, f.get("start_line"))
         if tool == "semgrep":
-            return _build_semgrep_prompt(f, ctx, repo_dir)
+            return _build_semgrep_prompt(f, repo_dir)
         elif tool in ("dotnet_audit", "dotnet-audit"):
             return _build_dotnet_prompt(f, repo_dir)
         else:
+            rel = _relpath_under_repo(repo_dir, f.get("file") or "") if f.get("file") else "(unknown)"
+            full_file = _file_context_full(repo_dir, rel if rel != "(unknown)" else None)
             return f"""Repo root: {repo_dir}
 Tool: {f.get('tool')}
 Finding: {f.get('id')}
 Severity: {f.get('severity')}
 Message: {f.get('message')}
-Target file (if known): {rel or '(unknown)'}
-Return STRICT JSON with rationale, patch_unified, tests, risk, commands. Patch MUST be a unified diff with headers as specified."""
+Target file (if known): {rel}
+
+Current file contents:
+{full_file or '(file not found)'}
+
+TASK:
+Return STRICT JSON. Prefer "revised_file" (ENTIRE revised file) or "revised_lines" (ENTIRE file as array).
+If the file above is wrong/unknown, include "target_file" with the correct relative path.
+No backticks or fences in values.
+"""
 
     def suggest_fixes(self, repo_name: str, repo_dir: str, findings_dir: str,
                       apply: bool = False, max_attempts: int = 3) -> str:
@@ -278,8 +313,8 @@ Return STRICT JSON with rationale, patch_unified, tests, risk, commands. Patch M
         sections: List[str] = []
 
         for idx, f in enumerate(findings, start=1):
-            rel = _relpath_under_repo(repo_dir, f["file"]) if f.get("file") else None
-            log(f"[fixer] Finding {idx}/{len(findings)} begin — tool={f.get('tool')}, id={f.get('id')}, file={rel}, line={f.get('start_line')}, severity={f.get('severity')}")
+            hinted_rel = _relpath_under_repo(repo_dir, f.get("file") or "") if f.get("file") else None
+            log(f"[fixer] Finding {idx}/{len(findings)} — tool={f.get('tool')}, id={f.get('id')}, file={hinted_rel}, line={f.get('start_line')}, severity={f.get('severity')}")
 
             base = os.path.join(out_dir, f"patch_{idx:03d}")
             attempts = 0
@@ -290,24 +325,27 @@ Return STRICT JSON with rationale, patch_unified, tests, risk, commands. Patch M
             risk = ""
             commands = ""
 
-            # NEW: keep prior attempt feedback & prior (normalized) patch
-            last_feedback = ""      # text of the last validator/unidiff error or "empty patch"
-            last_norm_patch = ""    # normalized diff from the prior attempt (what validator saw)
+            last_feedback = ""
+            last_norm_patch = ""
+
+            # Pre-read hinted file (if any)
+            file_path, current_text = _read_file(repo_dir, hinted_rel)
 
             while attempts < max_attempts:
                 attempts += 1
 
-                # Build base prompt for this finding
+                # Build base prompt
                 user_prompt = self._prompt_for_finding(f, repo_dir)
 
-                # If we have prior feedback/patch, append them so the LLM can correct
+                # Add previous feedback + previous diff if any
                 if last_feedback or last_norm_patch:
                     extra = "\n\nPrevious attempt feedback (please correct):\n" \
                             "<<<VALIDATOR_ERROR\n" + last_feedback.strip() + "\nVALIDATOR_ERROR>>>\n"
                     if last_norm_patch.strip():
-                        extra += "\nHere is the unified diff you previously returned (as the validator saw it):\n" \
+                        extra += "\nHere is the unified diff you previously returned/tried:\n" \
                                  "```diff\n" + last_norm_patch.strip() + "\n```\n"
-                    extra += "\nReissue a corrected unified diff with proper headers and accurate context.\n"
+                    extra += "\nReissue a corrected full file in 'revised_file' or 'revised_lines' "\
+                             "and include 'target_file' if the change belongs to a different file.\n"
                     user_prompt = user_prompt + "\n" + extra
 
                 # Log + write prompt
@@ -335,60 +373,125 @@ Return STRICT JSON with rationale, patch_unified, tests, risk, commands. Patch M
                     log(_maybe_truncate(raw_json))
                     log(f"[fixer][VERBOSE] ----- END RESPONSE -----")
 
+                # Accumulate descriptive fields if first time
                 rationale = rationale or _textify(resp.get("rationale"))
                 tests     = tests     or _textify(resp.get("tests"))
                 risk      = risk      or _textify(resp.get("risk"))
                 commands  = commands  or _textify(resp.get("commands"))
 
-                raw_patch = _textify(resp.get("patch_unified")).rstrip("\n")
-                Path(f"{base}.attempt{attempts}.raw.diff").write_text(raw_patch if raw_patch.endswith("\n") else raw_patch + "\n")
+                # Prefer revised_file / revised_lines
+                revised_text = ""
+                if isinstance(resp.get("revised_file"), str) and resp.get("revised_file").strip():
+                    revised_text = resp["revised_file"]
+                elif isinstance(resp.get("revised_lines"), list) and resp.get("revised_lines"):
+                    revised_text = "\n".join(str(x) for x in resp["revised_lines"])
 
-                if not raw_patch.strip():
-                    validation_msg = "LLM returned empty patch"
+                # If we didn’t get a full revised file, fall back to patch_unified path
+                if not revised_text.strip():
+                    patch_unified = _textify(resp.get("patch_unified")).rstrip("\n")
+                    if patch_unified.strip():
+                        last_norm_patch = _normalize_diff_paths(patch_unified, repo_dir)
+                        Path(f"{base}.attempt{attempts}.norm.diff").write_text(last_norm_patch if last_norm_patch.endswith("\n") else last_norm_patch + "\n")
+                        # Validate apply directly
+                        if self.validator:
+                            ok, msg = self.validator.check(repo_dir, last_norm_patch)
+                            note = (msg or "").strip() or ("applies cleanly" if ok else "failed to apply")
+                            Path(f"{base}.attempt{attempts}.validator.txt").write_text(note + "\n")
+                            if ok:
+                                final_patch = last_norm_patch if last_norm_patch.endswith("\n") else last_norm_patch + "\n"
+                                validation_msg = "applies cleanly"
+                                log(f"[fixer]    ✅ validator: {validation_msg}")
+                                break
+                            else:
+                                validation_msg = note
+                                last_feedback = validation_msg
+                                log(f"[fixer][WARN]    validator: {validation_msg}")
+                                continue
+                        else:
+                            final_patch = last_norm_patch if last_norm_patch.endswith("\n") else last_norm_patch + "\n"
+                            validation_msg = "validation disabled"
+                            Path(f"{base}.attempt{attempts}.validator.txt").write_text(validation_msg + "\n")
+                            log(f"[fixer]    ⚠ validator disabled; proceeding")
+                            break
+                    else:
+                        validation_msg = "LLM returned neither revised_file/revised_lines nor a unified diff"
+                        last_feedback = validation_msg
+                        Path(f"{base}.attempt{attempts}.validator.txt").write_text(validation_msg + "\n")
+                        log(f"[fixer][WARN]    {validation_msg}")
+                        continue
+
+                # Persist revised file text
+                Path(f"{base}.attempt{attempts}.revised.txt").write_text(revised_text if revised_text.endswith("\n") else revised_text + "\n")
+
+                # Determine target file to diff against:
+                resp_target = resp.get("target_file") if isinstance(resp.get("target_file"), str) else ""
+                chosen_rel = _select_target_file(repo_dir, hinted_rel, resp_target)
+                if not chosen_rel:
+                    validation_msg = "Target file is unknown; cannot compute diff from revised_file"
                     last_feedback = validation_msg
-                    last_norm_patch = ""  # nothing meaningful to show
+                    last_norm_patch = ""
+                    Path(f"{base}.attempt{attempts}.validator.txt").write_text(validation_msg + "\n")
+                    log(f"[fixer][WARN]    {validation_msg} (hinted={hinted_rel!r}, LLM target={resp_target!r})")
+                    continue
+
+                # Load current file content for chosen_rel
+                file_path, current_text = _read_file(repo_dir, chosen_rel)
+                if not file_path:
+                    validation_msg = f"Chosen target file does not exist: {chosen_rel}"
+                    last_feedback = validation_msg
+                    last_norm_patch = ""
                     Path(f"{base}.attempt{attempts}.validator.txt").write_text(validation_msg + "\n")
                     log(f"[fixer][WARN]    {validation_msg}")
                     continue
 
-                # Normalize headers/paths
-                patched = raw_patch
-                if rel:
-                    patched = _ensure_headers(patched, rel)
-                patched = _normalize_diff_paths(patched, repo_dir)
-                Path(f"{base}.attempt{attempts}.norm.diff").write_text(patched)
+                # Build diff via difflib
+                cur_lines = current_text.splitlines()
+                new_lines = revised_text.splitlines()
+                diff_iter = difflib.unified_diff(
+                    cur_lines, new_lines,
+                    fromfile=f"a/{chosen_rel}", tofile=f"b/{chosen_rel}",
+                    lineterm=""
+                )
+                built_patch = "\n".join(diff_iter)
+                if built_patch and not built_patch.endswith("\n"):
+                    built_patch += "\n"
 
-                header_preview = "\n".join(patched.splitlines()[:6])
-                log(f"[fixer]    Patch header preview:\n{header_preview}")
-
-                # Lint structure
-                ok_lint, lint_err = _lint_diff_with_unidiff(patched)
-                if not ok_lint:
-                    validation_msg = f"diff lint error (unidiff): {lint_err}"
+                if not built_patch.strip():
+                    validation_msg = "No changes detected between current file and revised_file"
                     last_feedback = validation_msg
-                    last_norm_patch = patched
+                    last_norm_patch = ""
+                    Path(f"{base}.attempt{attempts}.norm.diff").write_text("")  # empty diff
                     Path(f"{base}.attempt{attempts}.validator.txt").write_text(validation_msg + "\n")
                     log(f"[fixer][WARN]    {validation_msg}")
                     continue
 
-                # Validate apply
+                # Save normalized diff and validate
+                last_norm_patch = built_patch
+                Path(f"{base}.attempt{attempts}.norm.diff").write_text(built_patch)
+
+                # (Optional) lint structure — should pass since difflib generated it
+                if HAVE_UNIDIFF:
+                    try:
+                        PatchSet.from_string(built_patch)
+                    except Exception as e:
+                        Path(f"{base}.attempt{attempts}.validator.txt").write_text(f"unidiff lint warning: {e}\n")
+
                 if self.validator:
-                    ok, msg = self.validator.check(repo_dir, patched)
+                    ok, msg = self.validator.check(repo_dir, built_patch)
                     note = (msg or "").strip() or ("applies cleanly" if ok else "failed to apply")
                     Path(f"{base}.attempt{attempts}.validator.txt").write_text(note + "\n")
                     if ok:
-                        final_patch = patched if patched.endswith("\n") else patched + "\n"
+                        final_patch = built_patch
                         validation_msg = "applies cleanly"
-                        log(f"[fixer]    ✅ validator: {validation_msg}")
+                        log(f"[fixer]    ✅ validator: {validation_msg} (file={chosen_rel})")
                         break
                     else:
                         validation_msg = note
                         last_feedback = validation_msg
-                        last_norm_patch = patched
                         log(f"[fixer][WARN]    validator: {validation_msg}")
                         continue
                 else:
-                    final_patch = patched if patched.endswith("\n") else patched + "\n"
+                    final_patch = built_patch
                     validation_msg = "validation disabled"
                     Path(f"{base}.attempt{attempts}.validator.txt").write_text(validation_msg + "\n")
                     log(f"[fixer]    ⚠ validator disabled; proceeding")
@@ -407,13 +510,13 @@ Return STRICT JSON with rationale, patch_unified, tests, risk, commands. Patch M
                     validation_msg = f"{validation_msg}; {'applied' if ok_apply else 'apply failed'} — {msg_apply}"
                     log(f"[fixer] Apply result: {validation_msg}")
             else:
-                log(f"[fixer][ERROR] No valid patch produced after {max_attempts} attempts for id={f.get('id')} (file={rel}). Last error: {validation_msg}")
+                log(f"[fixer][ERROR] No valid patch produced after {max_attempts} attempts for id={f.get('id')} (hinted_file={hinted_rel}). Last error: {validation_msg}")
 
             # Compose report section
             sec = [
                 f"## {f.get('tool','')} — {f.get('id','')}",
                 f"**Severity:** {f.get('severity','medium')}",
-                f"**File:** `{f.get('file')}`:{f.get('start_line')}" if f.get("file") else "**File:** (n/a)",
+                f"**File (hinted):** `{f.get('file')}`:{f.get('start_line')}" if f.get("file") else "**File:** (n/a)",
                 f"**Component:** `{f.get('component')}`" if f.get("component") else "",
                 "",
                 "### Rationale",
