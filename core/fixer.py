@@ -4,6 +4,7 @@ import os, json, glob, datetime as dt, tempfile, shutil, subprocess, re, difflib
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
 from shutil import which
+from core.git_pr import create_branch_commit_push
 
 # ---------------- logging / util ----------------
 def _now_utc() -> str:
@@ -350,6 +351,8 @@ No backticks or fences in values.
             raise FileNotFoundError(f"No findings_* JSON in {findings_dir}")
         findings = json.loads(Path(latest).read_text() or "[]")
 
+        any_applied = False
+
         ts = datetime_utc()
         out_dir = os.path.join("data", "fixes", repo_name, ts)
         ensure_dir(out_dir)
@@ -554,18 +557,10 @@ No backticks or fences in values.
                 # Optionally apply to working tree
                 if apply and self.validator:
                     ok_apply, msg_apply = self.validator.apply(repo_dir, final_patch)
-                    log(f"[fixer] Apply target: {Path(repo_dir).resolve()}")
                     validation_msg = f"{validation_msg}; {'applied' if ok_apply else 'apply failed'} — {msg_apply}"
                     log(f"[fixer] Apply result: {validation_msg}")
-
-                    from core.git_pr import create_local_pr
-
-                    if apply and ok_apply:
-                        try:
-                            pr_link = create_local_pr(repo_dir)
-                            log(f"[fixer] ✅ Pull request ready: {pr_link}")
-                        except Exception as e:
-                            log(f"[fixer][WARN] PR creation failed: {e}")
+                    if ok_apply:
+                        any_applied = True
             else:
                 log(f"[fixer][ERROR] No valid patch produced after {max_attempts} attempts for id={f.get('id')} (hinted_file={hinted_rel}). Last error: {validation_msg}")
 
@@ -608,6 +603,16 @@ No backticks or fences in values.
         header = f"# AI Fix Suggestions — {repo_name}\n\n_Generated: {ts} UTC_\n\n"
         Path(report_path).write_text(header + "\n".join(sections))
         log(f"[fixer] Wrote report → {report_path}")
+        # create PR if we applied at least one patch in this run
+        if apply and any_applied:
+            try:
+                branch = os.getenv("AI_FIX_BRANCH", "ai-fix")
+                base   = os.getenv("AI_FIX_BASE",   "main")
+                pr_url = create_branch_commit_push(repo_dir, branch_name=branch, base=base, commit_message="AI security fixes")
+                log(f"[fixer] ✅ Pull request ready: {pr_url}")
+            except Exception as e:
+                log(f"[fixer][WARN] PR creation failed: {e}")
+
         return report_path
 
 def datetime_utc() -> str:
