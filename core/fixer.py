@@ -345,7 +345,7 @@ VALIDATOR_ERROR>>>
                     patched = _ensure_headers(patched, rel)
                 patched = _normalize_diff_paths(patched, repo_dir)
 
-                header_preview = "\n".join(patched.splitlines()[:6])
+                header_preview = "\n".join(patched.splitlines())
                 log(f"[fixer]    Patch header preview:\n{header_preview}")
 
                 # Lint diff structure (optional)
