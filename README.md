@@ -1,5 +1,6 @@
 # Agentic Security Remediator — Phase 1 (Plugin Starter)
 
+
 Solo-friendly, drop-in **plugin model** with plugins for:
 - Amazon Inspector (stub)
 - Synopsys Black Duck (stub)
