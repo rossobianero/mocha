@@ -557,6 +557,15 @@ No backticks or fences in values.
                     log(f"[fixer] Apply target: {Path(repo_dir).resolve()}")
                     validation_msg = f"{validation_msg}; {'applied' if ok_apply else 'apply failed'} — {msg_apply}"
                     log(f"[fixer] Apply result: {validation_msg}")
+
+                    from core.git_pr import create_local_pr
+
+                    if apply and ok_apply:
+                        try:
+                            pr_link = create_local_pr(repo_dir)
+                            log(f"[fixer] ✅ Pull request ready: {pr_link}")
+                        except Exception as e:
+                            log(f"[fixer][WARN] PR creation failed: {e}")
             else:
                 log(f"[fixer][ERROR] No valid patch produced after {max_attempts} attempts for id={f.get('id')} (hinted_file={hinted_rel}). Last error: {validation_msg}")
 
