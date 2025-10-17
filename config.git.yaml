@@ -3,7 +3,7 @@ repos:
     git_url: https://github.com/rossobianero/VulnerableApp.git
     branch: main
     depth: 0
-    ephemeral: true
+    # ephemeral: true
     scanners:
       - plugin: SemgrepPlugin
         config:
