@@ -1,6 +1,6 @@
 # core/fixer.py
 from __future__ import annotations
-import os, json, glob, datetime as dt, textwrap, tempfile, shutil, subprocess
+import os, json, glob, datetime as dt, textwrap, tempfile, shutil, subprocess, re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, List, Dict, Any
@@ -32,12 +32,136 @@ SEV_ORDER = ["low","medium","high","critical"]
 SYSTEM_PROMPT = """You are a senior security engineer. Return STRICT JSON with keys:
 ["rationale","patch_unified","tests","risk","commands"].
 All values MUST be strings (join multiple commands with newline).
-The patch MUST be a unified diff that applies cleanly to the given paths.
+The patch MUST be a valid unified diff that applies cleanly to the given paths.
+Headers MUST follow:
+--- a/<relative-path-from-repo-root>
++++ b/<relative-path-from-repo-root>
 If no change needed, set "patch_unified" to "" and explain in "rationale".
 Keep patches minimal and correct. Never invent files.
 """
 
 # ------------- helpers -------------
+import difflib
+
+def _parse_unified_diff(patch_text: str) -> List[dict]:
+    """
+    Very small unified-diff parser for one-file patches (what our fixer emits).
+    Returns list of hunks with:
+    { 'path_a','path_b','start_a','len_a','start_b','len_b','lines': [('+', text)|('-', text)|(' ', text)] }
+    """
+    lines = patch_text.splitlines()
+    i = 0
+    path_a = path_b = None
+    hunks = []
+    while i < len(lines):
+        ln = lines[i]
+        if ln.startswith('--- '):
+            path_a = ln[4:].strip()
+            i += 1
+            if i < len(lines) and lines[i].startswith('+++ '):
+                path_b = lines[i][4:].strip()
+                i += 1
+            else:
+                break
+        elif ln.startswith('@@'):
+            # @@ -l,s +l,s @@
+            header = ln
+            i += 1
+            import re
+            m = re.match(r'^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@', header)
+            if not m:
+                continue
+            sa = int(m.group(1)); la = int(m.group(2) or '1')
+            sb = int(m.group(3)); lb = int(m.group(4) or '1')
+            hunk_lines = []
+            while i < len(lines):
+                c = lines[i][:1]
+                if c in (' ', '+', '-'):
+                    hunk_lines.append((c, lines[i][1:]))
+                    i += 1
+                else:
+                    break
+            hunks.append({
+                'path_a': path_a, 'path_b': path_b,
+                'start_a': sa, 'len_a': la,
+                'start_b': sb, 'len_b': lb,
+                'lines': hunk_lines
+            })
+        else:
+            i += 1
+    return hunks
+
+def _apply_hunk_fuzzy(src_lines: List[str], hunk: dict) -> Optional[List[str]]:
+    """
+    Try to apply a single hunk to src_lines, allowing fuzzy position via SequenceMatcher.
+    Returns new lines on success, None on failure.
+    """
+    # Build expected old and new blocks from hunk
+    old_block = [t for c, t in hunk['lines'] if c != '+']
+    new_block = [t for c, t in hunk['lines'] if c != '-']
+
+    # exact attempt at stated position (1-based in diff)
+    pos = max(0, hunk['start_a'] - 1)
+    if src_lines[pos:pos+len(old_block)] == old_block:
+        return src_lines[:pos] + new_block + src_lines[pos+len(old_block):]
+
+    # fuzzy: search the best matching window
+    best_score = -1.0
+    best_pos = None
+    window = max(1, len(old_block))
+    for s in range(0, max(0, len(src_lines) - window + 1)):
+        score = difflib.SequenceMatcher(None, src_lines[s:s+len(old_block)], old_block).ratio()
+        if score > best_score:
+            best_score = score
+            best_pos = s
+
+    # require a decent match
+    if best_pos is not None and best_score >= 0.6:
+        return src_lines[:best_pos] + new_block + src_lines[best_pos+len(old_block):]
+
+    return None
+
+def _fuzzy_repair_patch(repo_dir: str, patch_text: str) -> Optional[str]:
+    """
+    Attempt to rebase the patch on top of current files:
+    - parse unified diff
+    - apply hunks fuzzily to the target file content
+    - re-diff to produce a clean, minimal unified diff
+    Returns repaired patch text or None.
+    """
+    hunks = _parse_unified_diff(patch_text)
+    if not hunks:
+        return None
+    # We assume single-file patches in our flow
+    target_header = hunks[0]['path_b'] or hunks[0]['path_a'] or ''
+    # header paths begin with a/ or b/
+    rel = _relpath_under_repo(repo_dir, re.sub(r'^(a/|b/)','', target_header))
+    file_path = Path(repo_dir) / rel
+    if not file_path.exists():
+        return None
+
+    src_text = file_path.read_text(errors='ignore')
+    src_lines = src_text.splitlines()
+
+    new_lines = src_lines
+    for h in hunks:
+        tmp = _apply_hunk_fuzzy(new_lines, h)
+        if tmp is None:
+            return None
+        new_lines = tmp
+
+    # produce a new unified diff
+    patched_text = "\n".join(new_lines) + ("\n" if src_text.endswith("\n") else "")
+    diff = difflib.unified_diff(
+        src_text.splitlines(),
+        patched_text.splitlines(),
+        fromfile=f"a/{rel}",
+        tofile=f"b/{rel}",
+        lineterm=""
+    )
+    out = "\n".join(diff)
+    return out if out.strip() else None
+
 def _textify(x) -> str:
     """Coerce LLM fields to a readable string."""
     if x is None:
@@ -73,6 +197,65 @@ def _latest_findings_path(findings_dir: str) -> Optional[str]:
     files = sorted(glob.glob(os.path.join(findings_dir, "findings_*.json")))
     return files[-1] if files else None
 
+def _relpath_under_repo(repo_dir: str, any_path: str) -> str:
+    """
+    Turn any incoming path into a path relative to repo_dir.
+    Strips common prefixes and prefers the shortest existing candidate under repo_dir.
+    """
+    if not any_path:
+        return any_path
+    p = any_path.strip()
+    # Strip diff prefixes first
+    p = re.sub(r"^(a/|b/)", "", p)
+
+    # Try suffixes that actually exist
+    parts = p.split("/")
+    candidates = []
+    for i in range(len(parts)):
+        candidate = "/".join(parts[i:])
+        if (Path(repo_dir) / candidate).exists():
+            candidates.append(candidate)
+    if candidates:
+        candidates.sort(key=len)
+        return candidates[0]
+
+    # Fall back: strip obvious prefixes
+    p = re.sub(r"^\./+", "", p)
+    p = re.sub(r"^repos/[^/]+/", "", p)
+    p = re.sub(r"^/+", "", p)
+    return p
+
+def _ensure_headers(unified_patch: str, relpath: str) -> str:
+    """
+    If the patch is hunk-only (no ---/+++), synthesize minimal headers for relpath.
+    """
+    if not unified_patch.strip():
+        return unified_patch
+    lines = [ln.rstrip("\n") for ln in unified_patch.splitlines()]
+    has_header = any(ln.startswith("--- ") for ln in lines) and any(ln.startswith("+++ ") for ln in lines)
+    if has_header or not relpath:
+        return unified_patch
+    hdr = [f"--- a/{relpath}", f"+++ b/{relpath}"]
+    return "\n".join(hdr + lines)
+
+def _normalize_diff_paths(unified_patch: str, repo_dir: str) -> str:
+    """
+    Rewrite diff header paths to be repo-relative with a/ and b/ prefixes.
+    """
+    out = []
+    for ln in unified_patch.splitlines():
+        if ln.startswith("--- "):
+            path = ln[4:].strip()
+            rel = _relpath_under_repo(repo_dir, path)
+            out.append(f"--- a/{rel}")
+        elif ln.startswith("+++ "):
+            path = ln[4:].strip()
+            rel = _relpath_under_repo(repo_dir, path)
+            out.append(f"+++ b/{rel}")
+        else:
+            out.append(ln)
+    return "\n".join(out)
+
 # ------------- minimal LLM adapter (disabled by default) -------------
 class LLMClient:
     def __init__(self, provider: Optional[str] = None):
@@ -88,6 +271,7 @@ class LLMClient:
 
 # ------------- simple rule-based fallbacks -------------
 def _best_effort_rule_fix(f: dict, repo_dir: str, context: str) -> Dict[str, str]:
+    import difflib
     tool = (f.get("tool") or "").lower()
     patch = ""; rationale = ""; tests = ""; risk = "Low"
     if tool == "dotnet_audit" and (f.get("component") or "").startswith("pkg:nuget/"):
@@ -99,15 +283,27 @@ def _best_effort_rule_fix(f: dict, repo_dir: str, context: str) -> Dict[str, str
         csprojs = list(Path(repo_dir).glob("**/*.csproj"))
         target = csprojs[0] if csprojs else None
         if target:
-            old = f'<PackageReference Include="{name}"'
-            new = f'<PackageReference Include="{name}" Version="X.Y.Z"'
-            patch = textwrap.dedent(f"""\
-            --- a/{target.as_posix()}
-            +++ b/{target.as_posix()}
-            @@
-            -    {old}
-            +    {new}
-            """)
+            text_old = target.read_text()
+            lines_old = text_old.splitlines(keepends=True)
+            changed = False
+            lines_new = []
+            for line in lines_old:
+                if f'<PackageReference Include="{name}"' in line:
+                    if ' Version="' in line:
+                        line = re.sub(r' Version="[^"]*"', ' Version="X.Y.Z"', line)
+                    else:
+                        line = line.replace('>', ' Version="X.Y.Z">', 1)
+                    changed = True
+                lines_new.append(line)
+            if changed:
+                text_new = "".join(lines_new)
+                rel = _relpath_under_repo(repo_dir, target.as_posix())
+                patch = "\n".join(difflib.unified_diff(
+                    text_old.splitlines(), text_new.splitlines(),
+                    fromfile=f"a/{rel}", tofile=f"b/{rel}", lineterm=""
+                ))
+            else:
+                rationale += " (PackageReference not found in .csproj.)"
         else:
             rationale += " (No .csproj found to patch.)"
     elif tool == "semgrep":
@@ -119,12 +315,16 @@ def _best_effort_rule_fix(f: dict, repo_dir: str, context: str) -> Dict[str, str
         tests = "Re-run scanners after manual adjustments."
     return {"rationale": rationale, "patch_unified": patch, "tests": tests, "risk": risk, "commands": ""}
 
-def _semgrep_prompt(f: dict, context: str) -> str:
+def _semgrep_prompt(f: dict, context: str, repo_dir: str) -> str:
+    rel = ""
+    if f.get("file"):
+        rel = _relpath_under_repo(repo_dir, f["file"])
     desc = f"""
+Repo root: {repo_dir}
+Target file (relative to repo root): {rel or '(unknown)'}
 Tool: {f.get('tool')}
 Rule/ID: {f.get('id')}
 Severity: {f.get('severity')}
-File: {f.get('file')}
 Line: {f.get('start_line')}
 Message: {f.get('message')}
 CWE(s): {', '.join(f.get('cwe') or []) if f.get('cwe') else 'n/a'}
@@ -133,18 +333,37 @@ CWE(s): {', '.join(f.get('cwe') or []) if f.get('cwe') else 'n/a'}
 {context or '(no context)'}
 --- END CONTEXT ---
 """.strip()
-    ask = "Propose a minimal secure fix. Return STRICT JSON (rationale, patch_unified, tests, risk, commands)."
+    ask = """
+Propose a minimal secure fix.
+Return STRICT JSON with keys ["rationale","patch_unified","tests","risk","commands"].
+All values MUST be strings (join multiple commands with newline).
+The patch MUST be a valid unified diff with headers that match the repo root:
+use exactly these headers:
+--- a/<relative-path-from-repo-root>
++++ b/<relative-path-from-repo-root>
+Do not include absolute paths or extra directory prefixes. Only modify the shown file(s).
+"""
     return desc + "\n\n" + ask
 
-def _dotnet_prompt(f: dict) -> str:
+def _dotnet_prompt(f: dict, repo_dir: str) -> str:
+    csprojs = list(Path(repo_dir).glob("**/*.csproj"))
+    rel = _relpath_under_repo(repo_dir, csprojs[0].as_posix()) if csprojs else "(no csproj found)"
     comp = f.get("component") or ""
     msg  = f.get("message") or ""
     return f"""The finding is from dotnet_audit.
+Repo root: {repo_dir}
+Target project file (relative to repo root): {rel}
 Package purl: {comp}
 Message: {msg}
 
-Suggest a minimal change to bump the vulnerable package in the .csproj/Directory.Packages.props.
-Return STRICT JSON; include a unified diff. If version unknown, use 'X.Y.Z' as placeholder.
+Suggest a minimal change to bump ONLY the vulnerable package in that .csproj (or Directory.Packages.props if present).
+Return STRICT JSON with keys ["rationale","patch_unified","tests","risk","commands"].
+All values MUST be strings.
+The patch MUST be a unified diff with headers:
+--- a/{rel}
++++ b/{rel}
+If the package line lacks a Version attribute, add Version="X.Y.Z". If present, replace just the version.
+Do not invent files. Keep the diff minimal.
 """
 
 # ------------- patch validator -------------
@@ -176,8 +395,11 @@ class PatchValidator:
         Path(patch_path).write_text(unified_patch)
 
         if self.has_git:
-            p = subprocess.run(["git","apply","--check", patch_path], cwd=tmp_repo,
-                               capture_output=True, text=True)
+            p = subprocess.run(
+                ["git", "apply", "--check", "--ignore-space-change", "--ignore-whitespace", patch_path],
+                cwd=tmp_repo, capture_output=True, text=True
+            )
+            
             ok = (p.returncode == 0)
             msg = (p.stderr or p.stdout or "").strip()
             shutil.rmtree(os.path.dirname(tmp_repo), ignore_errors=True)
@@ -214,10 +436,11 @@ class CodeFixer:
         sections: List[str] = []
         for idx, f in enumerate(data, start=1):
             ctx = _read_context(repo_dir, f.get("file"), f.get("start_line"))
-            if (f.get("tool") or "").lower() == "semgrep":
-                user_prompt = _semgrep_prompt(f, ctx)
-            elif (f.get("tool") or "").lower() == "dotnet_audit":
-                user_prompt = _dotnet_prompt(f)
+            tool = (f.get("tool") or "").lower()
+            if tool == "semgrep":
+                user_prompt = _semgrep_prompt(f, ctx, repo_dir)
+            elif tool == "dotnet_audit":
+                user_prompt = _dotnet_prompt(f, repo_dir)
             else:
                 user_prompt = f"Tool: {f.get('tool')}\nFinding: {f.get('id')}\nMessage: {f.get('message')}"
 
@@ -237,18 +460,45 @@ class CodeFixer:
             risk_txt          = _textify(resp.get("risk"))
             commands_txt      = _textify(resp.get("commands"))
 
+            # If we know the finding file, keep a normalized relative path for header synthesis
+            rel_for_finding = _relpath_under_repo(repo_dir, f["file"]) if f.get("file") else None
+
+            # Fix/sanitize patch content before saving & validating
+            if patch_unified_txt.strip():
+                if not any(line.startswith(("--- ", "+++ ")) for line in patch_unified_txt.splitlines()[:6]):
+                    patch_unified_txt = _ensure_headers(patch_unified_txt, rel_for_finding or "")
+                patch_unified_txt = _normalize_diff_paths(patch_unified_txt, repo_dir)
+
             # Save patch artifact and validate if present
             patch_path = None
             validation_summary = "not validated"
-            if patch_unified_txt.strip():
-                patch_path = os.path.join(out_dir, f"patch_{idx:03d}.diff")
-                Path(patch_path).write_text(patch_unified_txt)
+
+            def _validate(txt: str) -> tuple[bool, str]:
                 if self.validate:
-                    ok, msg = self.validator.check(repo_dir, patch_unified_txt)
-                    validation_summary = f"{'✅ applies cleanly' if ok else '❌ does NOT apply'} — {msg.strip()}" if msg else ("✅ applies cleanly" if ok else "❌ does NOT apply")
+                    ok, msg = self.validator.check(repo_dir, txt)
+                    return ok, (msg.strip() if msg else ("applies cleanly" if ok else "does NOT apply"))
                 else:
-                    validation_summary = "validation disabled"
+                    return True, "validation disabled"
+
+            repaired_txt = None
+            if patch_unified_txt.strip():
+                # First, try as-is
+                ok, msg = _validate(patch_unified_txt)
+                if not ok:
+                    # Try fuzzy repair
+                    repaired_txt = _fuzzy_repair_patch(repo_dir, patch_unified_txt)
+                    if repaired_txt:
+                        ok2, msg2 = _validate(repaired_txt)
+                        if ok2:
+                            patch_unified_txt = repaired_txt
+                            msg = msg2
+                            log("[fixer] Patch auto-repaired via fuzzy rebase.")
+                # Save whichever we ended up with
+                patch_path = os.path.join(out_dir, f"patch_{idx:03d}{'.fixed' if repaired_txt else ''}.diff")
+                Path(patch_path).write_text(patch_unified_txt)
+                validation_summary = f"{'✅ applies cleanly' if 'applies' in msg else '❌ does NOT apply'} — {msg}"
                 log(f"[fixer] Saved patch → {patch_path}")
+
 
             # compose section
             sec = [
