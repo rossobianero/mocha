@@ -10,6 +10,20 @@ from shutil import which
 def _now_utc() -> str:
     return dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
+# Verbose controls (env):
+#   FIXER_VERBOSE=1|true|yes   => enable verbose prompt/response logging
+#   FIXER_VERBOSE_MAX=int      => truncate long logs to this many chars (default: unlimited)
+_VERBOSE = os.getenv("FIXER_VERBOSE", "").lower() in ("1","true","yes","on")
+try:
+    _VERBOSE_MAX = int(os.getenv("FIXER_VERBOSE_MAX", "").strip() or "0")
+except Exception:
+    _VERBOSE_MAX = 0  # 0 => unlimited
+
+def _maybe_truncate(s: str) -> str:
+    if _VERBOSE_MAX and len(s) > _VERBOSE_MAX:
+        return s[:_VERBOSE_MAX] + f"\n\n[...truncated {len(s)-_VERBOSE_MAX} chars...]"
+    return s
+
 try:
     from core.util import ensure_dir, log as _ext_log
     def log(msg: str):
@@ -278,26 +292,30 @@ Return STRICT JSON with rationale, patch_unified, tests, risk, commands. Patch M
 
             while attempts < max_attempts:
                 attempts += 1
-                log(f"[fixer]  • Attempt {attempts}/{max_attempts} for id={f.get('id')} — prompting LLM")
                 user_prompt = self._prompt_for_finding(f, repo_dir)
 
-                if attempts > 1 and validation_msg:
-                    log(f"[fixer]    ↪ prior error fed to LLM: {validation_msg}")
-                    user_prompt += f"""
+                # verbose: log full prompt
+                if _VERBOSE:
+                    log(f"[fixer][VERBOSE] ----- LLM PROMPT (attempt {attempts}/{max_attempts}, id={f.get('id')}) -----")
+                    log(_maybe_truncate(user_prompt))
+                    log(f"[fixer][VERBOSE] ----- END PROMPT -----")
 
-Previous attempt failed validation with:
-<<<VALIDATOR_ERROR
-{validation_msg}
-VALIDATOR_ERROR>>>
-
-Please correct the unified diff accordingly. Ensure headers are relative to repo root and context matches the current file.
-"""
-
+                log(f"[fixer]  • Attempt {attempts}/{max_attempts} — prompting LLM")
                 try:
                     resp = self.llm.generate_json(SYSTEM_PROMPT, user_prompt)
                 except Exception as e:
                     log(f"[fixer][WARN] LLM call failed on attempt {attempts}: {e}")
                     resp = {}
+
+                # verbose: log raw response JSON
+                if _VERBOSE:
+                    try:
+                        raw_json = json.dumps(resp, indent=2, ensure_ascii=False)
+                    except Exception:
+                        raw_json = str(resp)
+                    log(f"[fixer][VERBOSE] ----- LLM RAW RESPONSE (attempt {attempts}) -----")
+                    log(_maybe_truncate(raw_json))
+                    log(f"[fixer][VERBOSE] ----- END RESPONSE -----")
 
                 rationale = rationale or _textify(resp.get("rationale"))
                 tests     = tests     or _textify(resp.get("tests"))
@@ -305,11 +323,20 @@ Please correct the unified diff accordingly. Ensure headers are relative to repo
                 commands  = commands  or _textify(resp.get("commands"))
 
                 raw_patch = _textify(resp.get("patch_unified")).rstrip("\n")
-                log(f"[fixer]    LLM returned patch length={len(raw_patch)} chars")
+                if _VERBOSE:
+                    log(f"[fixer][VERBOSE] Returned patch length: {len(raw_patch)} chars")
 
                 if not raw_patch.strip():
                     validation_msg = "LLM returned empty patch"
                     log(f"[fixer][WARN]    Empty patch from LLM")
+                    # feed the error into the *next* attempt:
+                    user_prompt += f"""
+
+Previous attempt failed validation with:
+<<<VALIDATOR_ERROR
+{validation_msg}
+VALIDATOR_ERROR>>>
+"""
                     continue
 
                 # Synthesize/normalize headers & paths
@@ -318,8 +345,7 @@ Please correct the unified diff accordingly. Ensure headers are relative to repo
                     patched = _ensure_headers(patched, rel)
                 patched = _normalize_diff_paths(patched, repo_dir)
 
-                # Show first few lines for visibility
-                header_preview = "\n".join(patched.splitlines()[:4])
+                header_preview = "\n".join(patched.splitlines()[:6])
                 log(f"[fixer]    Patch header preview:\n{header_preview}")
 
                 # Lint diff structure (optional)
@@ -327,6 +353,7 @@ Please correct the unified diff accordingly. Ensure headers are relative to repo
                 if not ok_lint:
                     validation_msg = f"diff lint error (unidiff): {lint_err}"
                     log(f"[fixer][WARN]    {validation_msg}")
+                    # feed back to LLM on next attempt
                     continue
 
                 # Validate apply
@@ -340,6 +367,7 @@ Please correct the unified diff accordingly. Ensure headers are relative to repo
                     else:
                         validation_msg = msg or "does NOT apply"
                         log(f"[fixer][WARN]    validator: {validation_msg}")
+                        # Include validator error in next attempt's prompt
                         continue
                 else:
                     final_patch = patched if patched.endswith("\n") else patched + "\n"
@@ -359,7 +387,6 @@ Please correct the unified diff accordingly. Ensure headers are relative to repo
                     ok_apply, msg_apply = self.validator.apply(repo_dir, final_patch)
                     validation_msg = f"{validation_msg}; {'applied' if ok_apply else 'apply failed'} — {msg_apply}"
                     log(f"[fixer] Apply result: {validation_msg}")
-
             else:
                 log(f"[fixer][ERROR] No valid patch produced after {max_attempts} attempts for id={f.get('id')} (file={rel}). Last error: {validation_msg}")
 
@@ -389,7 +416,7 @@ Please correct the unified diff accordingly. Ensure headers are relative to repo
                 (risk or "_(unspecified)_"),
                 "",
                 "### Suggested Commands",
-                (f"```bash\n{(_textify(resp.get('commands')) if 'resp' in locals() else commands).strip()}\n```" if (('resp' in locals() and _textify(resp.get('commands')).strip()) or (commands and commands.strip())) else "_(none)_"),
+                (f"```bash\n{commands.strip()}\n```" if commands.strip() else "_(none)_"),
                 "",
                 "---",
                 ""
