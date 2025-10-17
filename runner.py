@@ -42,13 +42,14 @@ def run_repo(repo_cfg, plugins_map, out_dir):
     log(f"[{name}] Saved findings → {out_file}")
     return out_file, artifacts_all
 
-
 def main():
     ap = argparse.ArgumentParser(description="Phase 1 security agent runner (plugin-based)")
     ap.add_argument("--config", required=True, help="Path to config YAML")
     ap.add_argument("--repo-filter", help="Only run for repos with this name")
     ap.add_argument("--out-dir", default="./data/findings", help="Findings output dir")
     ap.add_argument("--fix", action="store_true", help="Generate AI fix suggestions after scanning")
+    ap.add_argument("--apply", action="store_true", help="Apply validated patches to the working tree")
+    ap.add_argument("--patch-attempts", type=int, default=3, help="Max LLM diff correction attempts")
     args = ap.parse_args()
 
     cfg = load_yaml(args.config)
@@ -59,12 +60,12 @@ def main():
         if args.repo_filter and repo["name"] != args.repo_filter:
             continue
 
-        # --- Resolve repo_dir once (GitWorkspace or local_path) ---
+        # Resolve repo_dir once (GitWorkspace or local_path)
         repo_dir = None
         git_url    = repo.get("git_url")
         branch     = repo.get("branch")
         commit     = repo.get("commit")
-        pr_number  = repo.get("pr")          # integer or str
+        pr_number  = repo.get("pr")
         ephemeral  = bool(repo.get("ephemeral", False))
         depth      = int(repo.get("depth", 1))
         submodules = bool(repo.get("submodules", False))
@@ -95,25 +96,25 @@ def main():
             repo_dir = local_path
             out_file, _ = run_repo(repo, plugins_map, args.out_dir)
 
-        # --- Optional: AI/code-fix suggestions (single place) ---
         if args.fix:
-            findings_dir = os.path.join(args.out_dir, repo["name"])
-            # Lazy import so scans work even if fixer files are missing
             from core.fixer import CodeFixer
-            # Auto-enable OpenAI if key is present; else rule-based fallback
+            # Auto-enable OpenAI if key is present
             if os.getenv("OPENAI_API_KEY"):
                 try:
                     from core.llm_client_openai import OpenAILLMClient
                     fixer = CodeFixer(OpenAILLMClient("gpt-4o-mini"))
                 except Exception as e:
-                    log(f"[fixer] OpenAI client unavailable ({e}); falling back to rule-based.")
+                    log(f"[fixer] OpenAI client unavailable ({e}); falling back to dummy.")
                     fixer = CodeFixer()
             else:
                 fixer = CodeFixer()
 
-            report_path = fixer.suggest_fixes(repo["name"], repo_dir, findings_dir)
+            findings_dir = os.path.join(args.out_dir, repo["name"])
+            report_path = fixer.suggest_fixes(
+                repo["name"], repo_dir, findings_dir,
+                apply=args.apply, max_attempts=args.patch_attempts
+            )
             log(f"[{repo['name']}] Fix report at {report_path}")
-
 
 if __name__ == "__main__":
     main()
