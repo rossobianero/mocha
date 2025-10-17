@@ -4,16 +4,10 @@ from core.util import load_yaml, log, ensure_dir
 from core.registry import load_plugins
 from core.normalize import dedupe
 
-# Optional import: CodeFixer (AI/code suggestions report)
-# - By default, CodeFixer uses a no-external-API fallback (rule-based).
-# - If you later wire an LLM client, you can pass it into CodeFixer().
-from core.fixer import CodeFixer  # make sure core/fixer.py exists as provided earlier
-
-
 def run_repo(repo_cfg, plugins_map, out_dir):
     name = repo_cfg["name"]
     repo_dir = repo_cfg.get("local_path", f"./repos/{name}")
-    ensure_dir(repo_dir)  # In real use, clone/pull here
+    ensure_dir(repo_dir)
 
     findings_all = []
     artifacts_all = {}
@@ -54,8 +48,7 @@ def main():
     ap.add_argument("--config", required=True, help="Path to config YAML")
     ap.add_argument("--repo-filter", help="Only run for repos with this name")
     ap.add_argument("--out-dir", default="./data/findings", help="Findings output dir")
-    ap.add_argument("--fix", action="store_true",
-                    help="Generate AI fix suggestions report after scanning")
+    ap.add_argument("--fix", action="store_true", help="Generate AI fix suggestions after scanning")
     args = ap.parse_args()
 
     cfg = load_yaml(args.config)
@@ -66,9 +59,8 @@ def main():
         if args.repo_filter and repo["name"] != args.repo_filter:
             continue
 
-        # Git workspace handling (clone/checkout on demand)
-        from core.gitops import GitWorkspace
-
+        # --- Resolve repo_dir once (GitWorkspace or local_path) ---
+        repo_dir = None
         git_url    = repo.get("git_url")
         branch     = repo.get("branch")
         commit     = repo.get("commit")
@@ -78,6 +70,7 @@ def main():
         submodules = bool(repo.get("submodules", False))
 
         if git_url:
+            from core.gitops import GitWorkspace
             log(f"[gitops] activating workspace url={git_url} branch={branch} commit={commit} pr={pr_number} ephemeral={ephemeral}")
             with GitWorkspace(
                 git_url=git_url,
@@ -88,35 +81,37 @@ def main():
                 depth=depth,
                 submodules=submodules,
                 ephemeral=ephemeral,
-            ) as repo_dir:
-                log(f"[gitops] workspace ready at {repo_dir}")
-                # IMPORTANT: pass the resolved path down to run_repo
+            ) as ws_dir:
+                log(f"[gitops] workspace ready at {ws_dir}")
+                repo_dir = ws_dir
                 repo_for_run = {**repo, "local_path": repo_dir}
-                # Avoid any stale git_url from YAML leaking into downstream
                 repo_for_run.pop("git_url", None)
-
                 out_file, _ = run_repo(repo_for_run, plugins_map, args.out_dir)
+        else:
+            local_path = repo.get("local_path")
+            if not local_path or not os.path.exists(local_path):
+                log(f"[ERROR] No repo path found for {repo.get('name')}; set git_url or local_path")
+                continue
+            repo_dir = local_path
+            out_file, _ = run_repo(repo, plugins_map, args.out_dir)
 
-                # Optional AI/code-fix suggestions
-                if args.fix:
-                    findings_dir = os.path.join(args.out_dir, repo["name"])
-                    fixer = CodeFixer()  # or CodeFixer(OpenAILLMClient("gpt-4o-mini")) if you wire one
-                    report_path = fixer.suggest_fixes(repo["name"], repo_dir, findings_dir)
-                    log(f"[{repo['name']}] Fix report at {report_path}")
-            continue  # don’t fall through
-
-        # Fallback: legacy local_path behavior
-        local_path = repo.get("local_path")
-        if not local_path or not os.path.exists(local_path):
-            log(f"[ERROR] No repo path found for {repo.get('name')}; set git_url or local_path")
-            continue
-
-        out_file, _ = run_repo(repo, plugins_map, args.out_dir)
-
+        # --- Optional: AI/code-fix suggestions (single place) ---
         if args.fix:
             findings_dir = os.path.join(args.out_dir, repo["name"])
-            fixer = CodeFixer()
-            report_path = fixer.suggest_fixes(repo["name"], local_path, findings_dir)
+            # Lazy import so scans work even if fixer files are missing
+            from core.fixer import CodeFixer
+            # Auto-enable OpenAI if key is present; else rule-based fallback
+            if os.getenv("OPENAI_API_KEY"):
+                try:
+                    from core.llm_client_openai import OpenAILLMClient
+                    fixer = CodeFixer(OpenAILLMClient("gpt-4o-mini"))
+                except Exception as e:
+                    log(f"[fixer] OpenAI client unavailable ({e}); falling back to rule-based.")
+                    fixer = CodeFixer()
+            else:
+                fixer = CodeFixer()
+
+            report_path = fixer.suggest_fixes(repo["name"], repo_dir, findings_dir)
             log(f"[{repo['name']}] Fix report at {report_path}")
 
 
