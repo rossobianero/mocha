@@ -156,6 +156,7 @@ def _select_target_file(repo_dir: str, hinted_rel: Optional[str], resp_target: O
 # --------------- validation/apply ---------------
 class PatchValidator:
     def __init__(self):
+        from shutil import which
         self.has_git = bool(which("git"))
         self.has_patch = bool(which("patch"))
 
@@ -196,28 +197,74 @@ class PatchValidator:
             shutil.rmtree(os.path.dirname(tmp_repo), ignore_errors=True)
 
     def apply(self, repo_dir: str, unified_patch: str) -> tuple[bool, str]:
-        patch_path = os.path.join(repo_dir, ".ai_fix_apply.diff")
-        Path(patch_path).write_text(unified_patch if unified_patch.endswith("\n") else unified_patch + "\n")
+        """
+        Apply patch to the real working tree.
+        Uses absolute patch path to avoid CWD-relative path confusion.
+        Retries with different CWDs and falls back to `patch` if needed.
+        """
         try:
+            repo_abs = str(Path(repo_dir).resolve())
+            patch_abs = str((Path(repo_dir) / ".ai_fix_apply.diff").resolve())
+            Path(patch_abs).write_text(
+                unified_patch if unified_patch.endswith("\n") else unified_patch + "\n"
+            )
+
+            def _fmt(rc, out, err, where):
+                msg = (err or out or "").strip()
+                loc = f"[cwd={where}] patch={patch_abs}"
+                return (rc == 0, f"{'ok' if rc == 0 else 'error'} {loc}: {msg}" if msg else f"{'ok' if rc == 0 else 'error'} {loc}")
+
+            # Preferred: git apply with absolute patch path
             if self.has_git:
+                # Try with cwd=repo
                 p = subprocess.run(
-                    ["git","apply","--ignore-space-change","--ignore-whitespace", patch_path],
-                    cwd=repo_dir, capture_output=True, text=True
+                    ["git", "apply", "--ignore-space-change", "--ignore-whitespace", patch_abs],
+                    cwd=repo_abs, capture_output=True, text=True
                 )
-                ok = (p.returncode == 0)
-                msg = (p.stderr or p.stdout or "").strip()
-                return (ok, msg or ("applied" if ok else "apply failed"))
-            elif self.has_patch:
-                p = subprocess.run(["patch","-p0","-i", patch_path],
-                                   cwd=repo_dir, capture_output=True, text=True)
-                ok = (p.returncode == 0)
-                msg = (p.stderr or p.stdout or "").strip()
-                return (ok, msg or ("applied" if ok else "apply failed"))
+                ok, msg = _fmt(p.returncode, p.stdout, p.stderr, repo_abs)
+                if ok:
+                    return True, f"applied — {msg}"
+
+                # Retry with no cwd (use absolute paths end-to-end)
+                p2 = subprocess.run(
+                    ["git", "apply", "--ignore-space-change", "--ignore-whitespace", patch_abs],
+                    cwd=None, capture_output=True, text=True
+                )
+                ok2, msg2 = _fmt(p2.returncode, p2.stdout, p2.stderr, "None")
+                if ok2:
+                    return True, f"applied — {msg2}"
+
+                # Try with extra flags that sometimes help (index/whitespace/reject)
+                p3 = subprocess.run(
+                    ["git", "apply", "--index", "--reject", "--whitespace=fix", patch_abs],
+                    cwd=repo_abs, capture_output=True, text=True
+                )
+                ok3, msg3 = _fmt(p3.returncode, p3.stdout, p3.stderr, repo_abs)
+                if ok3:
+                    return True, f"applied — {msg3}"
+
+                git_err = f"{msg}\n{msg2}\n{msg3}".strip()
             else:
-                return (False, "no applier available (install git or patch)")
+                git_err = "git not available"
+
+            # Fallback: classic `patch`
+            if self.has_patch:
+                p4 = subprocess.run(
+                    ["patch", "-p0", "-i", patch_abs],
+                    cwd=repo_abs, capture_output=True, text=True
+                )
+                ok4, msg4 = _fmt(p4.returncode, p4.stdout, p4.stderr, repo_abs)
+                if ok4:
+                    return True, f"applied (via patch) — {msg4}"
+                return False, f"apply failed (via patch). git_err:\n{git_err}\npatch_err:\n{msg4}"
+
+            return False, f"no applier available (install git or patch). git_err:\n{git_err}"
         finally:
-            try: os.remove(patch_path)
-            except Exception: pass
+            # Best-effort cleanup
+            try:
+                (Path(repo_dir) / ".ai_fix_apply.diff").unlink(missing_ok=True)  # type: ignore[arg-type]
+            except Exception:
+                pass
 
 # ---------------- prompt builders ----------------
 def _build_semgrep_prompt(f: dict, repo_dir: str) -> str:
@@ -507,6 +554,7 @@ No backticks or fences in values.
                 # Optionally apply to working tree
                 if apply and self.validator:
                     ok_apply, msg_apply = self.validator.apply(repo_dir, final_patch)
+                    log(f"[fixer] Apply target: {Path(repo_dir).resolve()}")
                     validation_msg = f"{validation_msg}; {'applied' if ok_apply else 'apply failed'} — {msg_apply}"
                     log(f"[fixer] Apply result: {validation_msg}")
             else:
