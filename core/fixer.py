@@ -282,6 +282,7 @@ Return STRICT JSON with rationale, patch_unified, tests, risk, commands. Patch M
             rel = _relpath_under_repo(repo_dir, f["file"]) if f.get("file") else None
             log(f"[fixer] Finding {idx}/{len(findings)} begin — tool={f.get('tool')}, id={f.get('id')}, file={rel}, line={f.get('start_line')}, severity={f.get('severity')}")
 
+            base = os.path.join(out_dir, f"patch_{idx:03d}")
             attempts = 0
             final_patch = ""
             validation_msg = "no patch produced"
@@ -294,11 +295,13 @@ Return STRICT JSON with rationale, patch_unified, tests, risk, commands. Patch M
                 attempts += 1
                 user_prompt = self._prompt_for_finding(f, repo_dir)
 
-                # verbose: log full prompt
+                # verbose: log full prompt to file & console (optional)
                 if _VERBOSE:
                     log(f"[fixer][VERBOSE] ----- LLM PROMPT (attempt {attempts}/{max_attempts}, id={f.get('id')}) -----")
                     log(_maybe_truncate(user_prompt))
                     log(f"[fixer][VERBOSE] ----- END PROMPT -----")
+                # Always write prompt to file
+                Path(f"{base}.attempt{attempts}.prompt.txt").write_text(user_prompt)
 
                 log(f"[fixer]  • Attempt {attempts}/{max_attempts} — prompting LLM")
                 try:
@@ -307,12 +310,15 @@ Return STRICT JSON with rationale, patch_unified, tests, risk, commands. Patch M
                     log(f"[fixer][WARN] LLM call failed on attempt {attempts}: {e}")
                     resp = {}
 
-                # verbose: log raw response JSON
+                # raw response saved to file
+                try:
+                    raw_json = json.dumps(resp, indent=2, ensure_ascii=False)
+                except Exception:
+                    raw_json = str(resp)
+                Path(f"{base}.attempt{attempts}.response.json").write_text(raw_json)
+
+                # and optionally echoed to console
                 if _VERBOSE:
-                    try:
-                        raw_json = json.dumps(resp, indent=2, ensure_ascii=False)
-                    except Exception:
-                        raw_json = str(resp)
                     log(f"[fixer][VERBOSE] ----- LLM RAW RESPONSE (attempt {attempts}) -----")
                     log(_maybe_truncate(raw_json))
                     log(f"[fixer][VERBOSE] ----- END RESPONSE -----")
@@ -323,20 +329,14 @@ Return STRICT JSON with rationale, patch_unified, tests, risk, commands. Patch M
                 commands  = commands  or _textify(resp.get("commands"))
 
                 raw_patch = _textify(resp.get("patch_unified")).rstrip("\n")
+                Path(f"{base}.attempt{attempts}.raw.diff").write_text(raw_patch if raw_patch.endswith("\n") else raw_patch + "\n")
                 if _VERBOSE:
                     log(f"[fixer][VERBOSE] Returned patch length: {len(raw_patch)} chars")
 
                 if not raw_patch.strip():
                     validation_msg = "LLM returned empty patch"
+                    Path(f"{base}.attempt{attempts}.validator.txt").write_text(validation_msg + "\n")
                     log(f"[fixer][WARN]    Empty patch from LLM")
-                    # feed the error into the *next* attempt:
-                    user_prompt += f"""
-
-Previous attempt failed validation with:
-<<<VALIDATOR_ERROR
-{validation_msg}
-VALIDATOR_ERROR>>>
-"""
                     continue
 
                 # Synthesize/normalize headers & paths
@@ -344,41 +344,44 @@ VALIDATOR_ERROR>>>
                 if rel:
                     patched = _ensure_headers(patched, rel)
                 patched = _normalize_diff_paths(patched, repo_dir)
+                Path(f"{base}.attempt{attempts}.norm.diff").write_text(patched)
 
-                header_preview = "\n".join(patched.splitlines())
+                header_preview = "\n".join(patched.splitlines()[:6])
                 log(f"[fixer]    Patch header preview:\n{header_preview}")
 
                 # Lint diff structure (optional)
                 ok_lint, lint_err = _lint_diff_with_unidiff(patched)
                 if not ok_lint:
                     validation_msg = f"diff lint error (unidiff): {lint_err}"
+                    Path(f"{base}.attempt{attempts}.validator.txt").write_text(validation_msg + "\n")
                     log(f"[fixer][WARN]    {validation_msg}")
-                    # feed back to LLM on next attempt
                     continue
 
                 # Validate apply
                 if self.validator:
                     ok, msg = self.validator.check(repo_dir, patched)
+                    validator_note = (msg or "").strip() or ("applies cleanly" if ok else "failed to apply")
+                    Path(f"{base}.attempt{attempts}.validator.txt").write_text(validator_note + "\n")
                     if ok:
                         final_patch = patched if patched.endswith("\n") else patched + "\n"
                         validation_msg = "applies cleanly"
                         log(f"[fixer]    ✅ validator: {validation_msg}")
                         break
                     else:
-                        validation_msg = msg or "does NOT apply"
+                        validation_msg = validator_note
                         log(f"[fixer][WARN]    validator: {validation_msg}")
-                        # Include validator error in next attempt's prompt
                         continue
                 else:
                     final_patch = patched if patched.endswith("\n") else patched + "\n"
                     validation_msg = "validation disabled"
+                    Path(f"{base}.attempt{attempts}.validator.txt").write_text(validation_msg + "\n")
                     log(f"[fixer]    ⚠ validator disabled; proceeding")
                     break
 
-            # Save artifacts
+            # Save final artifact
             patch_path = None
             if final_patch.strip():
-                patch_path = os.path.join(out_dir, f"patch_{idx:03d}.diff")
+                patch_path = f"{base}.diff"
                 Path(patch_path).write_text(final_patch)
                 log(f"[fixer] Saved patch → {patch_path}")
 
@@ -408,6 +411,9 @@ VALIDATOR_ERROR>>>
                 "",
                 "### Patch Validation",
                 validation_msg,
+                "",
+                "### Attempt Artifacts",
+                f"- Prompts/Responses/Diffs per attempt are saved next to the report as `patch_{idx:03d}.attemptN.*`.",
                 "",
                 "### Tests / Validation",
                 (tests or "_(none)_"),
