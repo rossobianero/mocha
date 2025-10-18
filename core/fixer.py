@@ -4,7 +4,7 @@ import os, json, glob, datetime as dt, tempfile, shutil, subprocess, re, difflib
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
 from shutil import which
-from core.git_pr import create_branch_commit_push
+from core.git_pr import create_branch_commit_push, maybe_open_pr_from_repo
 
 # ---------------- logging / util ----------------
 def _now_utc() -> str:
@@ -609,9 +609,14 @@ No backticks or fences in values.
                 branch = os.getenv("AI_FIX_BRANCH", "ai-fix")
                 base   = os.getenv("AI_FIX_BASE",   "main")
                 pr_url = create_branch_commit_push(repo_dir, branch_name=branch, base=base, commit_message="AI security fixes")
-                log(f"[fixer] ✅ Pull request ready: {pr_url}")
+                log(f"[fixer] ✅ Branch pushed. Open PR: {pr_url}")
+
+                # Optional: actually open the PR via API if AI_PR_OPEN=1
+                api_pr = maybe_open_pr_from_repo(repo_dir, branch, base, "AI security fixes", "Automated remediation")
+                if api_pr:
+                    log(f"[fixer] ✅ PR opened: {api_pr}")
             except Exception as e:
-                log(f"[fixer][WARN] PR creation failed: {e}")
+                log(f"[fixer][WARN] PR step failed: {e}")
 
         return report_path
 
