@@ -14,8 +14,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from core.util import ensure_dir, log
 
-newLine = '\n'
-
 # ---------------------------
 # Small data structures
 # ---------------------------
@@ -104,12 +102,15 @@ def _run(cmd: List[str], cwd: Optional[str] = None) -> Tuple[int, str, str]:
 def _validate_patch(repo_dir: str, patch_path: str) -> Tuple[bool, str]:
     """
     Returns (ok, validator_message)
+    patch_path should be ABSOLUTE.
     """
+    # 1) git apply --check
     rc, out, err = _run(["git", "apply", "--check", patch_path], cwd=repo_dir)
     if rc == 0:
         return True, "applies cleanly"
     msg1 = f"git --check failed:\n{out}\n{err}".strip()
 
+    # 2) patch --dry-run -p0
     rc2, out2, err2 = _run(["patch", "-p0", "--dry-run", "-i", patch_path], cwd=repo_dir)
     if rc2 == 0:
         return True, "applies cleanly (via 'patch --dry-run')"
@@ -119,6 +120,9 @@ def _validate_patch(repo_dir: str, patch_path: str) -> Tuple[bool, str]:
 
 
 def _apply_patch(repo_dir: str, patch_path: str) -> Tuple[bool, str]:
+    """
+    patch_path should be ABSOLUTE.
+    """
     rc, out, err = _run(["git", "apply", patch_path], cwd=repo_dir)
     if rc == 0:
         return True, "applied"
@@ -368,8 +372,8 @@ class CodeFixer:
         resp: Dict[str, Any],
     ) -> Tuple[bool, str, str]:
         """
-        Convert model response to a patch file and validate it.
-        Returns (ok, patch_path, validator_message)
+        Convert model response to a patch file and validate/apply it.
+        Returns (ok, ABSOLUTE_patch_path, validator_message)
         """
         target_file = (resp.get("target_file") or finding.file or "").strip()
         target_file = _normalize_relpath(repo_dir, target_file)
@@ -381,20 +385,23 @@ class CodeFixer:
         # If neither lines nor file nor diff present, fail early
         if not (revised_file or revised_lines or patch_unified):
             patch_path = out_dir / f"{f_prefix}.attempt_{attempt:02d}.patch.diff"
-            return False, str(patch_path), "LLM returned no changes"
+            patch_abs = str(patch_path.resolve())
+            # still write an empty stub so validator path exists
+            _write_text(patch_path, "")
+            return False, patch_abs, "LLM returned no changes"
 
         if revised_file or revised_lines:
             if not target_file:
                 patch_path = out_dir / f"{f_prefix}.attempt_{attempt:02d}.patch.diff"
-                return False, str(patch_path), "Missing target_file for revised content"
+                patch_abs = str(patch_path.resolve())
+                _write_text(patch_path, "")
+                return False, patch_abs, "Missing target_file for revised content"
 
             old_lines = _load_file_lines(repo_dir, target_file)  # may be []
 
             if revised_file is not None and revised_lines is None:
-                # normalize to list of lines, keepends True
                 revised_lines = str(revised_file).splitlines(keepends=True)
             elif revised_lines is not None:
-                # ensure each element ends with newline for difflib
                 revised_lines = [(ln if ln.endswith("\n") else ln + "\n") for ln in revised_lines]
 
             patch_text = "".join(
@@ -411,16 +418,19 @@ class CodeFixer:
             # use patch_unified from model (verbatim)
             if not isinstance(patch_unified, str) or not patch_unified.strip():
                 patch_path = out_dir / f"{f_prefix}.attempt_{attempt:02d}.patch.diff"
-                return False, str(patch_path), "Empty unified diff from model"
+                patch_abs = str(patch_path.resolve())
+                _write_text(patch_path, "")
+                return False, patch_abs, "Empty unified diff from model"
             patch_text = patch_unified
 
-        # write patch
+        # write patch (relative to project root), then validate using ABSOLUTE path
         patch_path = out_dir / f"{f_prefix}.attempt_{attempt:02d}.patch.diff"
         _write_text(patch_path, patch_text)
+        patch_abs = str(patch_path.resolve())
 
-        # validate
-        ok, vmsg = _validate_patch(repo_dir, str(patch_path))
-        return ok, str(patch_path), vmsg
+        # validate (pass ABSOLUTE path so cwd changes don't break it)
+        ok, vmsg = _validate_patch(repo_dir, patch_abs)
+        return ok, patch_abs, vmsg
 
     def _augment_with_validation_feedback(self, user_prompt: str, validator_msg: str) -> str:
         feedback = (
