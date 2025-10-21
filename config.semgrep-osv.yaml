@@ -1,6 +1,6 @@
 repos:
   - name: VulnerableApp
-    git_url: https://github.com/rossobianero/VulnerableApp.git
+    git_url: https://github.com/rossobianero/Vulnerable.Net.git
     branch: main
     depth: 0
     # submodules: false
