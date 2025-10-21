@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
 from shutil import which
 from core.git_pr import create_branch_commit_push, maybe_open_pr_from_repo
+import os
+from core.util import log
 
 # ---------------- logging / util ----------------
 def _now_utc() -> str:
@@ -611,8 +613,17 @@ No backticks or fences in values.
                 pr_url = create_branch_commit_push(repo_dir, branch_name=branch, base=base, commit_message="AI security fixes")
                 log(f"[fixer] ✅ Branch pushed. Open PR: {pr_url}")
 
-                # Optional: actually open the PR via API if AI_PR_OPEN=1
-                api_pr = maybe_open_pr_from_repo(repo_dir, branch, base, "AI security fixes", "Automated remediation")
+                # Only open/update a PR from fixer if explicitly enabled.
+                # By default we delegate PR creation to runner.py which builds a rich body.
+                if os.getenv("FIXER_OPEN_PR", "").lower() in ("1", "true", "yes", "on"):
+                    from core.git_pr import open_or_update_pr_with_body
+                    pr_title = os.getenv("FIXER_PR_TITLE", "AI Security Fixes (Automated Remediation)")
+                    pr_body  = os.getenv("FIXER_PR_BODY", "Automated remediation (opened by fixer). See full report in artifacts.")
+                    api_pr   = open_or_update_pr_with_body(repo_dir, branch, base, pr_title, pr_body, also_comment=True)
+                    log(f"[fixer] ✅ PR opened/updated from fixer: {api_pr}")
+                else:
+                    log("[fixer] Skipping PR creation from fixer; delegated to runner.")
+
                 if api_pr:
                     log(f"[fixer] ✅ PR opened: {api_pr}")
             except Exception as e:
