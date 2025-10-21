@@ -16,6 +16,8 @@ from core.gitops import GitWorkspace
 from core.ci import run_ci
 from core.git_pr import create_branch_commit_push, maybe_open_pr_from_repo
 from core.fixer import CodeFixer
+# Use the real OpenAI LLM adapter (requires OPENAI_API_KEY)
+from core.llm_openai import OpenAILLMClient
 
 
 # --------------------
@@ -40,13 +42,28 @@ def _serialize_findings(findings: List[Any]) -> List[Dict[str, Any]]:
         if isinstance(f, dict):
             out.append(f)
         elif hasattr(f, "__dict__"):
-            # Shallow copy of dataclass-like Finding
-            d = dict(f.__dict__)
-            out.append(d)
+            out.append(dict(f.__dict__))
         else:
-            # Unknown object – best effort to stringify
             out.append({"raw": str(f)})
     return out
+
+
+def _latest_fix_report_path(repo_name: str) -> str | None:
+    root = pathlib.Path("data") / "fixes" / repo_name
+    if not root.exists():
+        return None
+    candidates = sorted(root.glob("*/AI_FIX_REPORT.md"))
+    return str(candidates[-1]) if candidates else None
+
+
+def _summarize_report(report_path: str, max_lines: int = 30) -> str:
+    try:
+        lines = pathlib.Path(report_path).read_text(encoding="utf-8").splitlines()
+        if len(lines) <= max_lines:
+            return "\n".join(lines)
+        return "\n".join(lines[:max_lines] + ["", "...(truncated for brevity)...", ""])
+    except Exception as e:
+        return f"_Unable to read fix report: {e}_"
 
 
 # --------------------
@@ -59,7 +76,7 @@ def run_repo(repo_cfg: Dict[str, Any], plugins_map: Dict[str, Any], out_dir: str
     """
     name = repo_cfg["name"]
     repo_dir = repo_cfg.get("local_path", f"./repos/{name}")
-    ensure_dir(repo_dir)  # workspace already prepared by GitWorkspace, but keep safe
+    ensure_dir(repo_dir)
 
     findings_all: List[Any] = []
     artifacts_all: Dict[str, Any] = {}
@@ -74,14 +91,12 @@ def run_repo(repo_cfg: Dict[str, Any], plugins_map: Dict[str, Any], out_dir: str
             log(f"[WARN] Missing 'plugin' key in scanners entry")
             continue
 
-        # Resolve by multiple normalized keys
         cls = (
             plugins_map.get(plugin_name)
             or plugins_map.get(plugin_name.lower())
             or plugins_map.get(plugin_name.replace("-", "_"))
             or plugins_map.get(plugin_name.replace("-", "_").lower())
         )
-
         if not cls:
             log(f"[WARN] Plugin {plugin_name} not found")
             continue
@@ -100,7 +115,6 @@ def run_repo(repo_cfg: Dict[str, Any], plugins_map: Dict[str, Any], out_dir: str
         except Exception as e:
             log(f"[ERROR] {plugin_name} failed: {e}")
 
-    # dedupe and persist
     findings_all = dedupe(findings_all)
     ts = _ts_utc()
     repo_out = pathlib.Path(out_dir) / repo_cfg["name"]
@@ -145,6 +159,10 @@ def main():
         log("[WARN] No repos to process")
         return
 
+    # Prepare LLM (for fixer)
+    model = os.getenv("AI_FIX_MODEL", "gpt-4o-mini")
+    llm = OpenAILLMClient(model=model)  # requires OPENAI_API_KEY
+
     for repo in repos:
         name = repo["name"]
         git_url = repo.get("git_url")
@@ -187,9 +205,7 @@ def main():
                 any_applied = False
                 if args.fix:
                     findings_dir = os.path.join(args.out_dir, name)
-                    from core.llm_openai import OpenAILLMClient
-                    model = os.getenv("AI_FIX_MODEL", "gpt-4o-mini")
-                    fixer = CodeFixer(llm=OpenAILLMClient(model=model))
+                    fixer = CodeFixer(llm=llm)
                     report_path = fixer.suggest_fixes(
                         name,
                         repo_dir,
@@ -213,10 +229,46 @@ def main():
                     log("[ci] Tests FAILED after fixes; skipping PR. See POST-SCAN logs for details.")
                     continue
 
-                # 4) PUSH BRANCH + (optional) OPEN PR
+                # 4) PUSH BRANCH + (optional) OPEN PR with rich description
                 try:
                     branch_out = os.getenv("AI_FIX_BRANCH", "ai-fix")
                     base_out = os.getenv("AI_FIX_BASE", branch or "main")
+
+                    # Build PR title/body
+                    title = "AI Security Fixes (Automated Remediation)"
+                    body_lines = [
+                        "### 🤖 Automated Security Remediation",
+                        "This pull request was generated automatically by the **AI Security Agent** system.",
+                        "",
+                        "#### Summary",
+                        "- Security findings were identified via configured SAST/SCA scanners (e.g., Semgrep, dotnet-audit).",
+                        "- Fixes were proposed and applied using an AI model.",
+                        "- Pre-scan and post-scan CI tests were executed to validate stability.",
+                        "",
+                        "#### CI Logs",
+                        f"- ✅ Pre-scan tests: `{pre_dir}`",
+                        f"- ✅ Post-scan tests: `{post_dir}`",
+                        "",
+                    ]
+
+                    latest_report = _latest_fix_report_path(name)
+                    if latest_report:
+                        body_lines.append("#### Vulnerabilities and Fixes")
+                        body_lines.append(f"Full AI-generated fix report:\n`{latest_report}`\n")
+                        body_lines.append(_summarize_report(latest_report, max_lines=30))
+
+                    body_lines.append("\n#### Unresolved Issues")
+                    body_lines.append(
+                        "Any vulnerabilities the AI system could not automatically remediate are documented in the report above. "
+                        "Please review and address manually as needed."
+                    )
+                    body_lines.append(
+                        "\n#### Disclaimer\n"
+                        "This pull request was created automatically by an AI-driven security remediation system. "
+                        "All changes have passed automated build and test validation, but please perform a human review before merging."
+                    )
+                    body = "\n".join(body_lines)
+
                     pr_url = create_branch_commit_push(
                         repo_dir,
                         branch_name=branch_out,
@@ -229,16 +281,15 @@ def main():
                         repo_dir,
                         branch_out,
                         base_out,
-                        "AI security fixes",
-                        f"Automated remediation.\n\nPre-CI logs: {pre_dir}\nPost-CI logs: {post_dir}",
+                        title,
+                        body,
                     )
                     if api_pr:
                         log(f"[fixer] ✅ PR opened: {api_pr}")
                 except Exception as e:
                     log(f"[fixer][WARN] PR step failed: {e}")
 
-            # next repo
-            continue
+            continue  # next repo
 
         # Legacy local_path flow (no git_url)
         local_path = repo.get("local_path")
@@ -262,9 +313,7 @@ def main():
         any_applied = False
         if args.fix:
             findings_dir = os.path.join(args.out_dir, name)
-            from core.llm_openai import OpenAILLMClient
-            model = os.getenv("AI_FIX_MODEL", "gpt-4o-mini")
-            fixer = CodeFixer(llm=OpenAILLMClient(model=model))
+            fixer = CodeFixer(llm=llm)
             report_path = fixer.suggest_fixes(
                 name,
                 local_path,
