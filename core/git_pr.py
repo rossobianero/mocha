@@ -6,7 +6,7 @@ import shlex
 import subprocess
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, Any
 
 
 # ------------- low-level helpers -------------
@@ -151,6 +151,79 @@ def _push_branch(repo_abs: str, branch: str, token_url: Optional[str]):
             )
 
 
+# ------------- GitHub API helpers -------------
+
+def _gh_headers() -> Dict[str, str]:
+    token = os.getenv("GITHUB_TOKEN", "").strip()
+    if not token:
+        raise RuntimeError("GITHUB_TOKEN not set")
+    return {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token}",
+        "User-Agent": "ai-security-agent/1.0",
+    }
+
+
+def _gh_json_request(method: str, url: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    import json, urllib.request
+    data = None
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=data, method=method)
+    for k, v in _gh_headers().items():
+        req.add_header(k, v)
+    with urllib.request.urlopen(req) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _find_existing_pr(owner: str, repo: str, head: str, base: str) -> Optional[Dict[str, Any]]:
+    """
+    Find an open PR for the given head/base.
+    Prefer the fast filter by head; if not available, fall back to listing.
+    """
+    # head must be "owner:branch" for the filter
+    url = f"https://api.github.com/repos/{owner}/{repo}/pulls?state=open&head={owner}%3A{head}&base={base}"
+    prs = _gh_json_request("GET", url)
+    if isinstance(prs, list) and prs:
+        return prs[0]
+    # Fallback: list all open PRs (rarely needed)
+    url2 = f"https://api.github.com/repos/{owner}/{repo}/pulls?state=open&base={base}"
+    prs2 = _gh_json_request("GET", url2)
+    if isinstance(prs2, list):
+        for pr in prs2:
+            if pr.get("head", {}).get("ref") == head:
+                return pr
+    return None
+
+
+def _open_pr(owner: str, repo: str, head: str, base: str, title: str, body: str) -> Dict[str, Any]:
+    payload = {
+        "title": title,
+        "head": head,  # branch name (same repo) or "owner:branch" (forks)
+        "base": base,
+        "body": body,
+        "maintainer_can_modify": True,
+        "draft": False,
+    }
+    url = f"https://api.github.com/repos/{owner}/{repo}/pulls"
+    return _gh_json_request("POST", url, payload)
+
+
+def _update_pr_body(owner: str, repo: str, number: int, title: Optional[str], body: Optional[str]) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {}
+    if title is not None:
+        payload["title"] = title
+    if body is not None:
+        payload["body"] = body
+    url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{number}"
+    return _gh_json_request("PATCH", url, payload)
+
+
+def _comment_on_pr(owner: str, repo: str, number: int, body: str) -> Dict[str, Any]:
+    url = f"https://api.github.com/repos/{owner}/{repo}/issues/{number}/comments"
+    return _gh_json_request("POST", url, {"body": body})
+
+
 # ------------- public API -------------
 
 def create_branch_commit_push(
@@ -194,42 +267,49 @@ def create_branch_commit_push(
     return _guess_compare_url(origin, base, branch_name)
 
 
-def open_pr_via_api(
-    owner: str,
-    repo: str,
-    head_branch: str,
-    base_branch: str,
+def open_or_update_pr_with_body(
+    repo_dir: str,
+    branch: str,
+    base: str,
     title: str,
-    body: str = "",
+    body_markdown: str,
+    also_comment: bool = True,
 ) -> str:
     """
-    Opens a GitHub PR via the REST API using GITHUB_TOKEN; returns PR html_url.
+    Ensures a PR exists for branch->base with the desired title/body.
+    If a PR already exists, its body is UPDATED (replaced) with body_markdown.
+    Optionally posts a separate comment echoing the details.
+    Returns the PR html_url.
     """
-    import json
-    import urllib.request
+    origin = _origin_url(str(Path(repo_dir).resolve()))
+    orr = _owner_repo_from_origin(origin)
+    if not orr:
+        raise RuntimeError("Cannot infer owner/repo from origin URL for API PR")
+    owner, repo = orr.split("/", 1)
 
-    token = os.getenv("GITHUB_TOKEN", "").strip()
-    if not token:
-        raise RuntimeError("GITHUB_TOKEN not set")
+    # Find or create PR
+    existing = _find_existing_pr(owner, repo, head=branch, base=base)
+    if existing:
+        number = int(existing["number"])
+        updated = _update_pr_body(owner, repo, number, title=title, body=body_markdown)
+        html_url = updated.get("html_url") or existing.get("html_url")
+        if also_comment:
+            try:
+                _comment_on_pr(owner, repo, number, body_markdown)
+            except Exception:
+                pass
+        return html_url
 
-    url = f"https://api.github.com/repos/{owner}/{repo}/pulls"
-    payload = json.dumps(
-        {
-            "title": title,
-            "head": head_branch,
-            "base": base_branch,
-            "body": body,
-            "maintainer_can_modify": True,
-            "draft": False,
-        }
-    ).encode("utf-8")
+    created = _open_pr(owner, repo, head=branch, base=base, title=title, body=body_markdown)
+    return created["html_url"]
 
-    req = urllib.request.Request(url, data=payload, method="POST")
-    req.add_header("Accept", "application/vnd.github+json")
-    req.add_header("Authorization", f"Bearer {token}")
-    with urllib.request.urlopen(req) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-        return data["html_url"]
+
+def open_pr_via_api(owner: str, repo: str, head_branch: str, base_branch: str, title: str, body: str = "") -> str:
+    """
+    Legacy: open a PR unconditionally (no update). Returns PR html_url.
+    """
+    created = _open_pr(owner, repo, head_branch, base_branch, title, body)
+    return created["html_url"]
 
 
 def maybe_open_pr_from_repo(
@@ -240,15 +320,9 @@ def maybe_open_pr_from_repo(
     body: str = "",
 ) -> Optional[str]:
     """
-    If AI_PR_OPEN=1 (or 'true'/'yes'/'on'), open a PR via the API using the repo's origin URL.
-    Returns the PR URL or None if not opened.
+    If AI_PR_OPEN=1 (or 'true'/'yes'/'on'), open or update a PR via the API using the repo's origin URL.
+    Ensures the PR has the provided body. Returns the PR URL or None if not opened.
     """
     if os.getenv("AI_PR_OPEN", "").lower() not in ("1", "true", "yes", "on"):
         return None
-
-    origin = _origin_url(str(Path(repo_dir).resolve()))
-    orr = _owner_repo_from_origin(origin)
-    if not orr:
-        raise RuntimeError("Cannot infer owner/repo from origin URL for API PR")
-    owner, repo = orr.split("/", 1)
-    return open_pr_via_api(owner, repo, branch, base, title, body)
+    return open_or_update_pr_with_body(repo_dir, branch, base, title, body, also_comment=True)
