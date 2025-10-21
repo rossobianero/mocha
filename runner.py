@@ -187,7 +187,9 @@ def main():
                 any_applied = False
                 if args.fix:
                     findings_dir = os.path.join(args.out_dir, name)
-                    fixer = CodeFixer()  # inject your real LLM client here if wired
+                    from core.llm_openai import OpenAILLMClient
+                    model = os.getenv("AI_FIX_MODEL", "gpt-4o-mini")
+                    fixer = CodeFixer(llm=OpenAILLMClient(model=model))
                     report_path = fixer.suggest_fixes(
                         name,
                         repo_dir,
@@ -260,7 +262,9 @@ def main():
         any_applied = False
         if args.fix:
             findings_dir = os.path.join(args.out_dir, name)
-            fixer = CodeFixer()
+            from core.llm_openai import OpenAILLMClient
+            model = os.getenv("AI_FIX_MODEL", "gpt-4o-mini")
+            fixer = CodeFixer(llm=OpenAILLMClient(model=model))
             report_path = fixer.suggest_fixes(
                 name,
                 local_path,
