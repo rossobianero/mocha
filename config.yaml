@@ -1,0 +1,14 @@
+repos:
+  - name: Vulnerable.Net
+    git_url: https://github.com/rossobianero/Vulnerable.Net.git
+    branch: main
+    depth: 0
+    scanners:
+      - plugin: semgrep
+      - plugin: dotnet_audit
+    ci_commands:
+      - dotnet --info
+      - dotnet restore
+      - dotnet build -c Release --no-restore
+      - dotnet test -c Release --no-build --logger trx
+    ci_timeout_sec: 900
