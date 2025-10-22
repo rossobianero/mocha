@@ -181,18 +181,18 @@ def create_branch_commit_push(
     if not branch_name or not str(branch_name).strip():
         branch_name = default_fix_branch_name()
 
-    # Fetch base and reset branch
-    _fetch_base(repo_abs, base, token_url)
-    rc, out, err = _run(["git", "checkout", "-B", branch_name, f"origin/{base}"], repo_abs)
-    if rc != 0:
-        raise RuntimeError(f"git checkout -B failed\nstdout:\n{out}\nstderr:\n{err}")
-
-    # Stage and commit if there are changes
+    # Stage and commit all changes BEFORE switching branches
     _run(["git", "add", "-A"], repo_abs)
     if _has_changes(repo_abs):
         rc, out, err = _run(["git", "commit", "-m", commit_message], repo_abs)
         if rc != 0:
             raise RuntimeError(f"git commit failed\nstdout:\n{out}\nstderr:\n{err}")
+
+    # Fetch base and reset branch
+    _fetch_base(repo_abs, base, token_url)
+    rc, out, err = _run(["git", "checkout", "-B", branch_name, f"origin/{base}"], repo_abs)
+    if rc != 0:
+        raise RuntimeError(f"git checkout -B failed\nstdout:\n{out}\nstderr:\n{err}")
 
     # Push branch (token remote if available)
     _push_branch(repo_abs, branch_name, token_url)

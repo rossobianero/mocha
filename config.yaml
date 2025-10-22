@@ -1,7 +1,7 @@
-llm: gemini
+llm: openai
 repos:
   - name: Vulnerable.Net
-    llm: gemini  # optional, overrides global llm
+    # llm: gemini  # optional, overrides global llm
     git_url: https://github.com/rossobianero/Vulnerable.Net.git
     branch: main
     depth: 0
@@ -15,7 +15,6 @@ repos:
       - dotnet test -c Release --no-build --logger trx
     ci_timeout_sec: 900
   - name: Vulnerable.Java
-    llm: gemini  # optional, uses global llm if not set
     git_url: https://github.com/rossobianero/Vulnerable.Java.git
     branch: main
     depth: 0

@@ -192,13 +192,28 @@ def main():
                 log(f"[ci] PRE-SCAN {'PASS' if pre_ok else 'FAIL'} — logs at {pre_dir}")
                 if not pre_ok:
                     log("[ci] Tests failed BEFORE scanning; aborting run.")
-                    continue  # stop early
+                    continue  # STOP
 
-                # 2) SCAN + (optional) FIX
+                # 2) Create branch (before fixes)
+                from core.util import default_fix_branch_name
+                branch_out = default_fix_branch_name()
+                base_out = os.getenv("AI_FIX_BASE", branch or "main")
+                # Fetch base and create branch
+                try:
+                    import core.git_pr as git_pr
+                    git_pr._fetch_base(repo_dir, base_out, None)
+                    rc, out, err = git_pr._run(["git", "checkout", "-B", branch_out, f"origin/{base_out}"], repo_dir)
+                    if rc != 0:
+                        log(f"[fixer][ERROR] git checkout -B failed\nstdout:\n{out}\nstderr:\n{err}")
+                        continue  # STOP
+                except Exception as e:
+                    log(f"[fixer][ERROR] branch creation failed: {e}")
+                    continue  # STOP
+
+                # 3) Apply fixes
                 repo_for_run = {**repo, "local_path": repo_dir}
                 repo_for_run.pop("git_url", None)
                 out_file, _ = run_repo(repo_for_run, plugins_map, args.out_dir)
-
                 any_applied = False
                 if args.fix:
                     findings_dir = os.path.join(args.out_dir, name)
@@ -213,25 +228,35 @@ def main():
                     log(f"[{name}] Fix report at {report_path}")
                     if args.apply and _git_has_changes(repo_dir):
                         any_applied = True
-
                 if not any_applied:
-                    log("[fixer] No code changes applied; skipping POST-SCAN tests and PR.")
-                    continue
+                    log("[fixer] No code changes to apply; aborting workflow.")
+                    continue  # STOP
 
-                # 3) POST-SCAN CI (regression gate)
+                # 4) POST-SCAN CI
                 log(f"[ci] POST-SCAN: running tests in {repo_dir} ...")
                 post_ok, post_dir = run_ci(name, repo_dir, commands=ci_cmds, timeout_sec=ci_timeout)
                 log(f"[ci] POST-SCAN {'PASS' if post_ok else 'FAIL'} — logs at {post_dir}")
                 if not post_ok:
-                    log("[ci] Tests FAILED after fixes; skipping PR. See POST-SCAN logs for details.")
-                    continue
+                    log("[ci] Tests FAILED after fixes; aborting workflow.")
+                    continue  # STOP
 
-                # 4) PUSH BRANCH + (optional) OPEN PR with rich description
+                # 5) Commit fixes
+                rc, out, err = git_pr._run(["git", "add", "-A"], repo_dir)
+                rc, out, err = git_pr._run(["git", "commit", "-m", "AI security fixes"], repo_dir)
+                if rc != 0:
+                    log(f"[fixer][ERROR] git commit failed\nstdout:\n{out}\nstderr:\n{err}")
+                    continue  # STOP
+
+                # 6) Push branch
                 try:
-                    from core.util import default_fix_branch_name
-                    branch_out = default_fix_branch_name()
-                    base_out = os.getenv("AI_FIX_BASE", branch or "main")
+                    git_pr._push_branch(repo_dir, branch_out, None)
+                    log(f"[fixer] ✅ Branch pushed. Open PR: https://github.com/{git_pr._owner_repo_from_origin(git_pr._origin_url(repo_dir))}/compare/{base_out}...{branch_out}?expand=1")
+                except Exception as e:
+                    log(f"[fixer][ERROR] git push failed: {e}")
+                    continue  # STOP
 
+                # 7) Create PR
+                try:
                     # Build PR title/body
                     title = "AI Security Fixes (Automated Remediation)"
                     body_lines = [
@@ -248,13 +273,11 @@ def main():
                         f"- ✅ Post-scan tests: `{post_dir}`",
                         "",
                     ]
-
                     latest_report = _latest_fix_report_path(name)
                     if latest_report:
                         body_lines.append("#### Vulnerabilities and Fixes")
                         body_lines.append(f"Full AI-generated fix report:\n`{latest_report}`\n")
                         body_lines.append(_summarize_report(latest_report, max_lines=30))
-
                     body_lines.append("\n#### Unresolved Issues")
                     body_lines.append(
                         "Any vulnerabilities the AI system could not automatically remediate are documented in the report above. "
@@ -266,16 +289,7 @@ def main():
                         "All changes have passed automated build and test validation, but please perform a human review before merging."
                     )
                     body = "\n".join(body_lines)
-
-                    pr_url = create_branch_commit_push(
-                        repo_dir,
-                        branch_name=branch_out,
-                        base=base_out,
-                        commit_message="AI security fixes",
-                    )
-                    log(f"[fixer] ✅ Branch pushed. Open PR: {pr_url}")
-
-                    api_pr = maybe_open_pr_from_repo(
+                    api_pr = git_pr.maybe_open_pr_from_repo(
                         repo_dir,
                         branch_out,
                         base_out,
