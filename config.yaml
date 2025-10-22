@@ -1,0 +1,24 @@
+repos:
+  - name: Vulnerable.Net
+    git_url: https://github.com/rossobianero/Vulnerable.Net.git
+    branch: main
+    depth: 0
+    scanners:
+      - plugin: semgrep
+      - plugin: dotnet_audit
+    ci_commands:
+      - dotnet --info
+      - dotnet restore
+      - dotnet build -c Release --no-restore
+      - dotnet test -c Release --no-build --logger trx
+    ci_timeout_sec: 900
+  - name: Vulnerable.Java
+    git_url: https://github.com/rossobianero/Vulnerable.Java.git
+    branch: main
+    depth: 0
+    scanners:
+      - plugin: semgrep
+      - plugin: osv_scanner
+    ci_commands:
+      - mvn test
+    ci_timeout_sec: 900

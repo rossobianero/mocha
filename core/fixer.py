@@ -4,6 +4,7 @@ import os, json, glob, datetime as dt, tempfile, shutil, subprocess, re, difflib
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
 from shutil import which
+from core.git_pr import create_branch_commit_push, maybe_open_pr_from_repo
 
 # ---------------- logging / util ----------------
 def _now_utc() -> str:
@@ -350,6 +351,8 @@ No backticks or fences in values.
             raise FileNotFoundError(f"No findings_* JSON in {findings_dir}")
         findings = json.loads(Path(latest).read_text() or "[]")
 
+        any_applied = False
+
         ts = datetime_utc()
         out_dir = os.path.join("data", "fixes", repo_name, ts)
         ensure_dir(out_dir)
@@ -358,6 +361,7 @@ No backticks or fences in values.
         log(f"[fixer] Starting fix suggestions — repo={repo_name}, findings={len(findings)}, attempts={max_attempts}, apply={apply}")
 
         sections: List[str] = []
+        sections_slim: List[str] = []        
 
         for idx, f in enumerate(findings, start=1):
             hinted_rel = _relpath_under_repo(repo_dir, f.get("file") or "") if f.get("file") else None
@@ -554,14 +558,51 @@ No backticks or fences in values.
                 # Optionally apply to working tree
                 if apply and self.validator:
                     ok_apply, msg_apply = self.validator.apply(repo_dir, final_patch)
-                    log(f"[fixer] Apply target: {Path(repo_dir).resolve()}")
                     validation_msg = f"{validation_msg}; {'applied' if ok_apply else 'apply failed'} — {msg_apply}"
                     log(f"[fixer] Apply result: {validation_msg}")
+                    if ok_apply:
+                        any_applied = True
             else:
                 log(f"[fixer][ERROR] No valid patch produced after {max_attempts} attempts for id={f.get('id')} (hinted_file={hinted_rel}). Last error: {validation_msg}")
 
             # Compose report section
-            sec = [
+            sec_full = [
+                 f"## {f.get('tool','')} — {f.get('id','')}",
+                 f"**Severity:** {f.get('severity','medium')}",
+                 f"**File (hinted):** `{f.get('file')}`:{f.get('start_line')}" if f.get("file") else "**File:** (n/a)",
+                 f"**Component:** `{f.get('component')}`" if f.get("component") else "",
+                 "",
+                 "### Rationale",
+                 (rationale or "_(none)_"),
+                 "",
+                 "### Suggested Patch (unified diff)",
+                 "```diff",
+                 (final_patch.strip() if final_patch else "# (No concrete patch available; manual change required.)"),
+                 "```",
+                 (f"_Patch file_: `{os.path.relpath(patch_path, start='.')}`" if patch_path else ""),
+                 "",
+                 "### Patch Validation",
+                 validation_msg,
+                 "",
+                 "### Attempt Artifacts",
+                 f"- All attempts saved alongside this report as `patch_{idx:03d}.attemptN.*`.",
+                 "",
+                 "### Tests / Validation",
+                 (tests or "_(none)_"),
+                 "",
+                 "### Operational Risk",
+                 (risk or "_(unspecified)_"),
+                 "",
+                 "### Suggested Commands",
+                 (f"```bash\n{commands.strip()}\n```" if commands.strip() else "_(none)_"),
+                 "",
+                 "---",
+                 ""
+            ]
+            sections.append("\n".join(sec_full))
+
+            # SLIM version: identical, but omit the giant diff block (keep pointers)
+            sec_slim = [
                 f"## {f.get('tool','')} — {f.get('id','')}",
                 f"**Severity:** {f.get('severity','medium')}",
                 f"**File (hinted):** `{f.get('file')}`:{f.get('start_line')}" if f.get("file") else "**File:** (n/a)",
@@ -570,11 +611,9 @@ No backticks or fences in values.
                 "### Rationale",
                 (rationale or "_(none)_"),
                 "",
-                "### Suggested Patch (unified diff)",
-                "```diff",
-                (final_patch.strip() if final_patch else "# (No concrete patch available; manual change required.)"),
-                "```",
-                (f"_Patch file_: `{os.path.relpath(patch_path, start='.')}`" if patch_path else ""),
+                "### Suggested Patch",
+                "_(omitted in slim report — see `AI_FIX_REPORT.md` for unified diff)_",
+                (f"_Patch file_: `{os.path.relpath(patch_path, start='.')}`" if patch_path else "_No patch file produced_"),
                 "",
                 "### Patch Validation",
                 validation_msg,
@@ -594,11 +633,43 @@ No backticks or fences in values.
                 "---",
                 ""
             ]
-            sections.append("\n".join(sec))
+            sections_slim.append("\n".join(sec_slim))
 
         header = f"# AI Fix Suggestions — {repo_name}\n\n_Generated: {ts} UTC_\n\n"
+        # Full report (with diffs)
         Path(report_path).write_text(header + "\n".join(sections))
         log(f"[fixer] Wrote report → {report_path}")
+        # Slim report (no diffs)
+        slim_path = os.path.join(out_dir, "AI_FIX_REPORT_SLIM.md")
+        Path(slim_path).write_text(header + "\n".join(sections_slim))
+        log(f"[fixer] Wrote slim report → {slim_path}")
+        # create PR if we applied at least one patch in this run
+        if apply and any_applied:
+            try:
+                # Default branch format: delegate to util.default_fix_branch_name()
+                from core.util import default_fix_branch_name
+                branch = default_fix_branch_name()
+                base = os.getenv("AI_FIX_BASE", "main")
+                pr_url = create_branch_commit_push(repo_dir, branch_name=branch, base=base, commit_message="AI security fixes")
+                log(f"[fixer] ✅ Branch pushed. Open PR: {pr_url}")
+
+                # Optional: actually open the PR via API if AI_PR_OPEN=1
+                # Use the slim report as the PR body when available; fall back to a default string.
+                slim_path_local = os.path.join(out_dir, "AI_FIX_REPORT_SLIM.md")
+                pr_body = "Automated remediation"
+                try:
+                    if os.path.exists(slim_path_local):
+                        pr_body = Path(slim_path_local).read_text(encoding="utf-8")
+                except Exception:
+                    # keep fallback
+                    pass
+
+                api_pr = maybe_open_pr_from_repo(repo_dir, branch, base, "AI security fixes", pr_body)
+                if api_pr:
+                    log(f"[fixer] ✅ PR opened: {api_pr}")
+            except Exception as e:
+                log(f"[fixer][WARN] PR step failed: {e}")
+
         return report_path
 
 def datetime_utc() -> str:
