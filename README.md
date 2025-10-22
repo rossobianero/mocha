@@ -4,7 +4,7 @@
       <img src="docs/Mocha.PNG" alt="Mocha logo" height="80">
     </td>
     <td style="vertical-align:middle; padding-left:12px;">
-      <h1 style="margin:0;">Project Mocha</h1>
+      <p style="margin:0;font-size:45pt">Project Mocha</p>
     </td>
   </tr>
 </table>
