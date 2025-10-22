@@ -5,6 +5,9 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
 from shutil import which
 from core.git_pr import create_branch_commit_push, maybe_open_pr_from_repo
+from core.util import load_yaml
+from core.llm_openai import OpenAILLMClient
+from core.llm_client_gemini import GeminiLLMClient
 
 # ---------------- logging / util ----------------
 def _now_utc() -> str:
@@ -313,9 +316,24 @@ No backticks or fences in values.
 """
 
 # ------------------ main API ------------------
+def get_llm_client(config_path: str, repo_name: Optional[str] = None) -> LLMClient:
+    """
+    Selects and returns the correct LLM client (OpenAI or Gemini) based on config.yaml.
+    """
+    config = load_yaml(config_path)
+    llm_type = config.get('llm', 'openai').lower()
+    if repo_name:
+        for repo in config.get('repos', []):
+            if repo.get('name') == repo_name and 'llm' in repo:
+                llm_type = repo['llm'].lower()
+                break
+    if llm_type == 'gemini':
+        return GeminiLLMClient()
+    return OpenAILLMClient()
+
 class CodeFixer:
-    def __init__(self, llm: Optional[LLMClient] = None, validate_patches: bool = True):
-        self.llm = llm or LLMClient()
+    def __init__(self, llm: Optional[LLMClient] = None, validate_patches: bool = True, config_path: str = "config.yaml", repo_name: Optional[str] = None):
+        self.llm = llm or get_llm_client(config_path, repo_name)
         self.validate = validate_patches
         self.validator = PatchValidator() if validate_patches else None
 
