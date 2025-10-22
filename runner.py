@@ -231,7 +231,10 @@ def main():
 
                 # 4) PUSH BRANCH + (optional) OPEN PR with rich description
                 try:
-                    branch_out = os.getenv("AI_FIX_BRANCH", "ai-fix")
+                    branch_out = os.getenv("AI_FIX_BRANCH")
+                    if not branch_out or not branch_out.strip():
+                        from datetime import datetime, timezone
+                        branch_out = f"bugfix/sec-ai-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
                     base_out = os.getenv("AI_FIX_BASE", branch or "main")
 
                     # Build PR title/body

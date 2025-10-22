@@ -7,6 +7,7 @@ import subprocess
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional, Tuple
+import datetime as dt
 
 
 # ------------- low-level helpers -------------
@@ -155,10 +156,10 @@ def _push_branch(repo_abs: str, branch: str, token_url: Optional[str]):
 
 def create_branch_commit_push(
     repo_dir: str,
-    branch_name: str = "ai-fix",
+    branch_name: Optional[str] = None,
     base: str = "main",
     commit_message: str = "AI security fixes",
-) -> str:
+ ) -> str:
     """
     Creates/resets <branch_name> from origin/<base>, commits current changes if any,
     and pushes via a temporary token remote when GITHUB_TOKEN is present.
@@ -174,6 +175,10 @@ def create_branch_commit_push(
     origin = _origin_url(repo_abs)
     token = os.getenv("GITHUB_TOKEN", "").strip()
     token_url = _make_token_https(origin, token) if token else None
+
+    # Compute a default branch name if none provided: bugfix/sec-ai-<timestamp>
+    if not branch_name or not str(branch_name).strip():
+        branch_name = os.getenv("AI_FIX_BRANCH") or f"bugfix/sec-ai-{dt.datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}"
 
     # Fetch base and reset branch
     _fetch_base(repo_abs, base, token_url)
