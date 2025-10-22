@@ -7,7 +7,8 @@ import subprocess
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional, Tuple
-import datetime as dt
+
+from core.util import default_fix_branch_name
 
 
 # ------------- low-level helpers -------------
@@ -176,9 +177,9 @@ def create_branch_commit_push(
     token = os.getenv("GITHUB_TOKEN", "").strip()
     token_url = _make_token_https(origin, token) if token else None
 
-    # Compute a default branch name if none provided: bugfix/sec-ai-<timestamp>
+    # Compute a default branch name if none provided: delegate to util.default_fix_branch_name()
     if not branch_name or not str(branch_name).strip():
-        branch_name = os.getenv("AI_FIX_BRANCH") or f"bugfix/sec-ai-{dt.datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}"
+        branch_name = default_fix_branch_name()
 
     # Fetch base and reset branch
     _fetch_base(repo_abs, base, token_url)
