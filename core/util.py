@@ -14,7 +14,7 @@ def ensure_dir(p):
 
 
 def log(msg: str):
-    ts = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds") + "Z"
+    ts = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
     print(f"{ts} {msg}", flush=True)
 
 
