@@ -14,7 +14,7 @@ from core.registry import load_plugins
 from core.normalize import dedupe
 from core.gitops import GitWorkspace
 from core.ci import run_ci
-from core.git_pr import create_branch_commit_push, maybe_open_pr_from_repo
+import core.git_pr as git_pr
 from core.fixer import CodeFixer, get_llm_client
 
 
@@ -157,11 +157,10 @@ def main():
         log("[WARN] No repos to process")
         return
 
-    # Prepare LLM (for fixer)
-    llm = get_llm_client(args.config)
-
     for repo in repos:
         name = repo["name"]
+        # Select LLM per repo (honors per-repo overrides in config)
+        llm = get_llm_client(args.config, name)
         git_url = repo.get("git_url")
         branch = repo.get("branch")
         commit = repo.get("commit")
@@ -184,7 +183,7 @@ def main():
             ) as repo_dir:
                 log(f"[gitops] workspace ready at {repo_dir}")
 
-                # 1) PRE-SCAN CI GATEKEEPER
+                # 1) PRE-SCAN
                 ci_cmds = repo.get("ci_commands") if isinstance(repo.get("ci_commands"), list) else None
                 ci_timeout = repo.get("ci_timeout_sec")
                 log(f"[ci] PRE-SCAN: running tests in {repo_dir} ...")
@@ -192,28 +191,26 @@ def main():
                 log(f"[ci] PRE-SCAN {'PASS' if pre_ok else 'FAIL'} — logs at {pre_dir}")
                 if not pre_ok:
                     log("[ci] Tests failed BEFORE scanning; aborting run.")
-                    continue  # STOP
+                    continue
 
-                # 2) Create branch (before fixes)
+                # 2) Create branch from base
                 from core.util import default_fix_branch_name
                 branch_out = default_fix_branch_name()
                 base_out = os.getenv("AI_FIX_BASE", branch or "main")
-                # Fetch base and create branch
                 try:
-                    import core.git_pr as git_pr
                     git_pr._fetch_base(repo_dir, base_out, None)
                     rc, out, err = git_pr._run(["git", "checkout", "-B", branch_out, f"origin/{base_out}"], repo_dir)
                     if rc != 0:
                         log(f"[fixer][ERROR] git checkout -B failed\nstdout:\n{out}\nstderr:\n{err}")
-                        continue  # STOP
+                        continue
                 except Exception as e:
                     log(f"[fixer][ERROR] branch creation failed: {e}")
-                    continue  # STOP
+                    continue
 
                 # 3) Apply fixes
                 repo_for_run = {**repo, "local_path": repo_dir}
                 repo_for_run.pop("git_url", None)
-                out_file, _ = run_repo(repo_for_run, plugins_map, args.out_dir)
+                run_repo(repo_for_run, plugins_map, args.out_dir)
                 any_applied = False
                 if args.fix:
                     findings_dir = os.path.join(args.out_dir, name)
@@ -230,34 +227,38 @@ def main():
                         any_applied = True
                 if not any_applied:
                     log("[fixer] No code changes to apply; aborting workflow.")
-                    continue  # STOP
+                    continue
 
-                # 4) POST-SCAN CI
+                # 4) POST-SCAN
                 log(f"[ci] POST-SCAN: running tests in {repo_dir} ...")
                 post_ok, post_dir = run_ci(name, repo_dir, commands=ci_cmds, timeout_sec=ci_timeout)
                 log(f"[ci] POST-SCAN {'PASS' if post_ok else 'FAIL'} — logs at {post_dir}")
                 if not post_ok:
                     log("[ci] Tests FAILED after fixes; aborting workflow.")
-                    continue  # STOP
+                    continue
 
-                # 5) Commit fixes
+                # 5) Commit changes (if staged)
                 rc, out, err = git_pr._run(["git", "add", "-A"], repo_dir)
-                rc, out, err = git_pr._run(["git", "commit", "-m", "AI security fixes"], repo_dir)
-                if rc != 0:
-                    log(f"[fixer][ERROR] git commit failed\nstdout:\n{out}\nstderr:\n{err}")
-                    continue  # STOP
+                staged = subprocess.run(["git", "diff", "--cached", "--name-only"], cwd=repo_dir, capture_output=True, text=True).stdout.strip()
+                if staged:
+                    rc, out, err = git_pr._run(["git", "commit", "-m", "AI security fixes"], repo_dir)
+                    if rc != 0:
+                        log(f"[fixer][ERROR] git commit failed\nstdout:\n{out}\nstderr:\n{err}")
+                        continue
+                else:
+                    log("[fixer] No new changes to commit after fixes; working tree clean.")
 
                 # 6) Push branch
                 try:
                     git_pr._push_branch(repo_dir, branch_out, None)
-                    log(f"[fixer] ✅ Branch pushed. Open PR: https://github.com/{git_pr._owner_repo_from_origin(git_pr._origin_url(repo_dir))}/compare/{base_out}...{branch_out}?expand=1")
+                    compare_url = f"https://github.com/{git_pr._owner_repo_from_origin(git_pr._origin_url(repo_dir))}/compare/{base_out}...{branch_out}?expand=1"
+                    log(f"[fixer] ✅ Branch pushed. Open PR: {compare_url}")
                 except Exception as e:
                     log(f"[fixer][ERROR] git push failed: {e}")
-                    continue  # STOP
+                    continue
 
-                # 7) Create PR
+                # 7) Create PR (optional)
                 try:
-                    # Build PR title/body
                     title = "AI Security Fixes (Automated Remediation)"
                     body_lines = [
                         "### 🤖 Automated Security Remediation",
@@ -289,13 +290,7 @@ def main():
                         "All changes have passed automated build and test validation, but please perform a human review before merging."
                     )
                     body = "\n".join(body_lines)
-                    api_pr = git_pr.maybe_open_pr_from_repo(
-                        repo_dir,
-                        branch_out,
-                        base_out,
-                        title,
-                        body,
-                    )
+                    api_pr = git_pr.maybe_open_pr_from_repo(repo_dir, branch_out, base_out, title, body)
                     if api_pr:
                         log(f"[fixer] ✅ PR opened: {api_pr}")
                 except Exception as e:
@@ -303,13 +298,13 @@ def main():
 
             continue  # next repo
 
-        # Legacy local_path flow (no git_url)
+        # Legacy local_path mode (no git_url)
         local_path = repo.get("local_path")
         if not local_path or not os.path.exists(local_path):
             log(f"[ERROR] No repo path found for {name}; set git_url or local_path")
             continue
 
-        # PRE-SCAN CI
+        # PRE-SCAN
         ci_cmds = repo.get("ci_commands") if isinstance(repo.get("ci_commands"), list) else None
         ci_timeout = repo.get("ci_timeout_sec")
         log(f"[ci] PRE-SCAN: running tests in {local_path} ...")
@@ -319,9 +314,8 @@ def main():
             log("[ci] Tests failed BEFORE scanning; aborting run.")
             continue
 
-        # SCAN
-        out_file, _ = run_repo(repo, plugins_map, args.out_dir)
-
+        # Apply fixes
+        run_repo(repo, plugins_map, args.out_dir)
         any_applied = False
         if args.fix:
             findings_dir = os.path.join(args.out_dir, name)
@@ -341,7 +335,7 @@ def main():
             log("[fixer] No code changes applied; skipping POST-SCAN tests and PR.")
             continue
 
-        # POST-SCAN CI
+        # POST-SCAN
         log(f"[ci] POST-SCAN: running tests in {local_path} ...")
         post_ok, post_dir = run_ci(name, local_path, commands=ci_cmds, timeout_sec=ci_timeout)
         log(f"[ci] POST-SCAN {'PASS' if post_ok else 'FAIL'} — logs at {post_dir}")

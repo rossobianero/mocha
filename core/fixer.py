@@ -157,6 +157,39 @@ def _select_target_file(repo_dir: str, hinted_rel: Optional[str], resp_target: O
 
     return None
 
+def _normalize_diff_paths(patch_text: str, repo_dir: str) -> str:
+    """
+    Normalize file paths in unified diffs to use standard a/ and b/ prefixes with
+    repo-relative paths. This helps "git apply" locate files consistently.
+    Only adjusts header lines starting with '--- ' or '+++ '.
+    """
+    lines: list[str] = []
+    for line in (patch_text or "").splitlines():
+        if line.startswith("--- ") or line.startswith("+++ "):
+            prefix = line[:4]  # '--- ' or '+++ '
+            rest = line[4:]
+            # Path may be followed by a tab and timestamp; keep suffix after path
+            if "\t" in rest:
+                path_part, meta = rest.split("\t", 1)
+                meta = "\t" + meta
+            else:
+                path_part, meta = rest, ""
+            # Strip common prefixes
+            path_part = re.sub(r"^(a/|b/)", "", path_part.strip())
+            path_part = re.sub(r"^\./+", "", path_part)
+            path_part = re.sub(r"^/+,?", "", path_part)
+            # Try to normalize against repo root
+            norm = _relpath_under_repo(repo_dir, path_part) or path_part
+            # Rebuild with a/ for '---' and b/ for '+++'
+            if prefix.startswith("---"):
+                fixed = f"--- a/{norm}{meta}"
+            else:
+                fixed = f"+++ b/{norm}{meta}"
+            lines.append(fixed)
+        else:
+            lines.append(line)
+    return "\n".join(lines)
+
 # --------------- validation/apply ---------------
 class PatchValidator:
     def __init__(self):
@@ -332,10 +365,13 @@ def get_llm_client(config_path: str, repo_name: Optional[str] = None) -> LLMClie
     return OpenAILLMClient()
 
 class CodeFixer:
-    def __init__(self, llm: Optional[LLMClient] = None, validate_patches: bool = True, config_path: str = "config.yaml", repo_name: Optional[str] = None):
+    def __init__(self, llm: Optional[LLMClient] = None, validate_patches: bool = True, config_path: str = "config.yaml", repo_name: Optional[str] = None, auto_pr: bool = False):
         self.llm = llm or get_llm_client(config_path, repo_name)
         self.validate = validate_patches
         self.validator = PatchValidator() if validate_patches else None
+        # When True, this class will push a branch and create a PR after applying patches.
+        # The default is False; the runner orchestrates git/PR steps after post-scan tests pass.
+        self.auto_pr = auto_pr
 
     def _prompt_for_finding(self, f: dict, repo_dir: str) -> str:
         tool = (f.get("tool") or "").lower()
@@ -661,8 +697,8 @@ No backticks or fences in values.
         slim_path = os.path.join(out_dir, "AI_FIX_REPORT_SLIM.md")
         Path(slim_path).write_text(header + "\n".join(sections_slim))
         log(f"[fixer] Wrote slim report → {slim_path}")
-        # create PR if we applied at least one patch in this run
-        if apply and any_applied:
+        # Optional: create PR if we applied at least one patch in this run
+        if self.auto_pr and apply and any_applied:
             try:
                 # Default branch format: delegate to util.default_fix_branch_name()
                 from core.util import default_fix_branch_name
