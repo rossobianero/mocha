@@ -1,9 +1,8 @@
-<table>
-  <tr>
-    <td><img src="docs/Mocha.PNG" alt="Thumbnail" height="96"></td>
-    <td><strong style="font-size:24px;">Project Mocha</strong></td>
-  </tr>
-</table>
+<p>
+  <img src="docs/Mocha.PNG" alt="Thumbnail" height="96" style="vertical-align:middle;">
+  &nbsp;&nbsp;
+  <strong style="font-size:24px; vertical-align:middle;">Project Mocha</strong>
+</p>
 
 
 Mocha is an agentic security remediator that scans repositories using pluggable scanners (SAST/SCA), suggests AI-generated fixes, validates them with CI, and opens pull requests with the fixes:
