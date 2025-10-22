@@ -1,7 +1,7 @@
 <p>
   <img src="docs/Mocha.PNG" alt="Thumbnail" height="96" style="vertical-align:middle;">
   &nbsp;&nbsp;
-  <strong style="font-size:24px; vertical-align:middle;">Project Mocha</strong>
+  <strong style="font-size:75px; vertical-align:middle;">Project Mocha</strong>
 </p>
 
 
