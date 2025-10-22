@@ -656,7 +656,17 @@ No backticks or fences in values.
                 log(f"[fixer] ✅ Branch pushed. Open PR: {pr_url}")
 
                 # Optional: actually open the PR via API if AI_PR_OPEN=1
-                api_pr = maybe_open_pr_from_repo(repo_dir, branch, base, "AI security fixes", "Automated remediation")
+                # Use the slim report as the PR body when available; fall back to a default string.
+                slim_path_local = os.path.join(out_dir, "AI_FIX_REPORT_SLIM.md")
+                pr_body = "Automated remediation"
+                try:
+                    if os.path.exists(slim_path_local):
+                        pr_body = Path(slim_path_local).read_text(encoding="utf-8")
+                except Exception:
+                    # keep fallback
+                    pass
+
+                api_pr = maybe_open_pr_from_repo(repo_dir, branch, base, "AI security fixes", pr_body)
                 if api_pr:
                     log(f"[fixer] ✅ PR opened: {api_pr}")
             except Exception as e:
