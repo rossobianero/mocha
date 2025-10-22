@@ -361,6 +361,7 @@ No backticks or fences in values.
         log(f"[fixer] Starting fix suggestions — repo={repo_name}, findings={len(findings)}, attempts={max_attempts}, apply={apply}")
 
         sections: List[str] = []
+        sections_slim: List[str] = []        
 
         for idx, f in enumerate(findings, start=1):
             hinted_rel = _relpath_under_repo(repo_dir, f.get("file") or "") if f.get("file") else None
@@ -565,7 +566,43 @@ No backticks or fences in values.
                 log(f"[fixer][ERROR] No valid patch produced after {max_attempts} attempts for id={f.get('id')} (hinted_file={hinted_rel}). Last error: {validation_msg}")
 
             # Compose report section
-            sec = [
+            sec_full = [
+                 f"## {f.get('tool','')} — {f.get('id','')}",
+                 f"**Severity:** {f.get('severity','medium')}",
+                 f"**File (hinted):** `{f.get('file')}`:{f.get('start_line')}" if f.get("file") else "**File:** (n/a)",
+                 f"**Component:** `{f.get('component')}`" if f.get("component") else "",
+                 "",
+                 "### Rationale",
+                 (rationale or "_(none)_"),
+                 "",
+                 "### Suggested Patch (unified diff)",
+                 "```diff",
+                 (final_patch.strip() if final_patch else "# (No concrete patch available; manual change required.)"),
+                 "```",
+                 (f"_Patch file_: `{os.path.relpath(patch_path, start='.')}`" if patch_path else ""),
+                 "",
+                 "### Patch Validation",
+                 validation_msg,
+                 "",
+                 "### Attempt Artifacts",
+                 f"- All attempts saved alongside this report as `patch_{idx:03d}.attemptN.*`.",
+                 "",
+                 "### Tests / Validation",
+                 (tests or "_(none)_"),
+                 "",
+                 "### Operational Risk",
+                 (risk or "_(unspecified)_"),
+                 "",
+                 "### Suggested Commands",
+                 (f"```bash\n{commands.strip()}\n```" if commands.strip() else "_(none)_"),
+                 "",
+                 "---",
+                 ""
+            ]
+            sections.append("\n".join(sec_full))
+
+            # SLIM version: identical, but omit the giant diff block (keep pointers)
+            sec_slim = [
                 f"## {f.get('tool','')} — {f.get('id','')}",
                 f"**Severity:** {f.get('severity','medium')}",
                 f"**File (hinted):** `{f.get('file')}`:{f.get('start_line')}" if f.get("file") else "**File:** (n/a)",
@@ -574,11 +611,9 @@ No backticks or fences in values.
                 "### Rationale",
                 (rationale or "_(none)_"),
                 "",
-                "### Suggested Patch (unified diff)",
-                "```diff",
-                (final_patch.strip() if final_patch else "# (No concrete patch available; manual change required.)"),
-                "```",
-                (f"_Patch file_: `{os.path.relpath(patch_path, start='.')}`" if patch_path else ""),
+                "### Suggested Patch",
+                "_(omitted in slim report — see `AI_FIX_REPORT.md` for unified diff)_",
+                (f"_Patch file_: `{os.path.relpath(patch_path, start='.')}`" if patch_path else "_No patch file produced_"),
                 "",
                 "### Patch Validation",
                 validation_msg,
@@ -598,11 +633,16 @@ No backticks or fences in values.
                 "---",
                 ""
             ]
-            sections.append("\n".join(sec))
+            sections_slim.append("\n".join(sec_slim))
 
         header = f"# AI Fix Suggestions — {repo_name}\n\n_Generated: {ts} UTC_\n\n"
+        # Full report (with diffs)
         Path(report_path).write_text(header + "\n".join(sections))
         log(f"[fixer] Wrote report → {report_path}")
+        # Slim report (no diffs)
+        slim_path = os.path.join(out_dir, "AI_FIX_REPORT_SLIM.md")
+        Path(slim_path).write_text(header + "\n".join(sections_slim))
+        log(f"[fixer] Wrote slim report → {slim_path}")
         # create PR if we applied at least one patch in this run
         if apply and any_applied:
             try:
