@@ -1,26 +1,29 @@
 # core/llm_client_gemini.py
+from core.util import log
 import os
 import json
 from typing import Any, Dict, Optional
 
 try:
-    from google.generativeai import GenerativeModel
+    import google.generativeai as genai
 except ImportError:
-    GenerativeModel = None
+    genai = None
 
 class GeminiLLMClient:
     """
     Minimal adapter for core.fixer.LLMClient interface using Google Gemini API.
     """
     def __init__(self, model: str = "gemini-pro", api_key: Optional[str] = None, temperature: float = 0.2):
-        if GenerativeModel is None:
+        log(f"[llm] Using Gemini LLM Client with model: {model}")
+        if genai is None:
             raise RuntimeError("google-generativeai is not installed.")
         self.api_key = api_key or os.getenv("GEMINI_API_KEY")
         if not self.api_key:
             raise RuntimeError("GEMINI_API_KEY is not set.")
         self.model = model
         self.temperature = float(temperature)
-        self.client = GenerativeModel(model_name=self.model, api_key=self.api_key)
+        genai.configure(api_key=self.api_key)
+        self.client = genai.GenerativeModel(model_name=self.model)
 
     def generate_json(self, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
         prompt = f"{system_prompt}\n{user_prompt}"

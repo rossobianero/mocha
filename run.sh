@@ -4,6 +4,7 @@ docker build -t ai-sec-agent:cli .
 
 docker run --rm \
   -e OPENAI_API_KEY="$OPENAI_API_KEY" \
+  -e GEMINI_API_KEY="$GEMINI_API_KEY" \
   -e AI_FIX_MODEL="gpt-4o-mini" \
   -e GITHUB_TOKEN="$GITHUB_TOKEN" \
   -e AI_PR_OPEN=1 \

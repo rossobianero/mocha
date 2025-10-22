@@ -1,5 +1,6 @@
 # core/llm_client_openai.py
 import os
+from core.util import log
 from openai import OpenAI
 
 class OpenAILLMClient:
@@ -9,6 +10,7 @@ class OpenAILLMClient:
     """
 
     def __init__(self, model: str = "gpt-4o-mini"):
+        log(f"[llm] Using OpenAI LLM Client with model: {model}")
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise EnvironmentError("Missing OPENAI_API_KEY environment variable")

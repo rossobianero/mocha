@@ -15,9 +15,7 @@ from core.normalize import dedupe
 from core.gitops import GitWorkspace
 from core.ci import run_ci
 from core.git_pr import create_branch_commit_push, maybe_open_pr_from_repo
-from core.fixer import CodeFixer
-# Use the real OpenAI LLM adapter (requires OPENAI_API_KEY)
-from core.llm_openai import OpenAILLMClient
+from core.fixer import CodeFixer, get_llm_client
 
 
 # --------------------
@@ -160,8 +158,7 @@ def main():
         return
 
     # Prepare LLM (for fixer)
-    model = os.getenv("AI_FIX_MODEL", "gpt-4o-mini")
-    llm = OpenAILLMClient(model=model)  # requires OPENAI_API_KEY
+    llm = get_llm_client(args.config)
 
     for repo in repos:
         name = repo["name"]

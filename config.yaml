@@ -1,4 +1,4 @@
-llm: gemini  # or copilot
+llm: gemini
 repos:
   - name: Vulnerable.Net
     llm: gemini  # optional, overrides global llm
