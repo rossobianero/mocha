@@ -1,7 +1,6 @@
 <p>
-  <img src="docs/Mocha.PNG" alt="Thumbnail" height="96" style="vertical-align:middle;">
-  &nbsp;&nbsp;
-  <strong style="font-size:175px; vertical-align:middle;">Project Mocha</strong>
+  <img src="docs/Mocha.PNG"" alt="Thumbnail" height="96" align="left">
+  <strong><h2 style="display:inline;">Project Mocha</h2></strong>
 </p>
 
 
