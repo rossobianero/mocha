@@ -646,12 +646,10 @@ No backticks or fences in values.
         # create PR if we applied at least one patch in this run
         if apply and any_applied:
             try:
-                # Default branch format: bugfix/sec-ai-<timestamp>
-                branch = os.getenv("AI_FIX_BRANCH")
-                if not branch or not branch.strip():
-                    from datetime import datetime, timezone
-                    branch = f"bugfix/sec-ai-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
-                base   = os.getenv("AI_FIX_BASE",   "main")
+                # Default branch format: delegate to util.default_fix_branch_name()
+                from core.util import default_fix_branch_name
+                branch = default_fix_branch_name()
+                base = os.getenv("AI_FIX_BASE", "main")
                 pr_url = create_branch_commit_push(repo_dir, branch_name=branch, base=base, commit_message="AI security fixes")
                 log(f"[fixer] ✅ Branch pushed. Open PR: {pr_url}")
 
