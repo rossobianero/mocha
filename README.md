@@ -1,11 +1,13 @@
-<div style="display:flex; align-items:center; width:100%; gap:16px;">
-  <div style="flex: 0 0 auto;">
-    <img src="docs/Mocha.PNG" alt="Mocha logo" style="height:75pt; width:auto; display:block;">
-  </div>
-  <div style="flex: 1 1 auto;">
-    <p style="font-size:35pt; margin:0;">Project Mocha</p>
-  </div>
-</div>
+<table cellpadding="0" cellspacing="0">
+  <tr>
+    <td style="vertical-align:middle; white-space:nowrap;">
+      <img src="docs/Mocha.PNG" alt="Mocha logo" height="80">
+    </td>
+    <td style="vertical-align:middle; padding-left:12px;">
+      <h1 style="margin:0;">Project Mocha</h1>
+    </td>
+  </tr>
+</table>
 
 Mocha is an agentic security remediator that scans repositories using pluggable scanners (SAST/SCA), suggests AI-generated fixes, validates them with CI, and opens pull requests with the fixes:
 
